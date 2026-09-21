@@ -104,6 +104,7 @@ El esquema de `schema-subvfy.sql` ya está implementado en `app/models/` (14 tab
 - `827c98b6a656_esquema_inicial_subvfy.py` — las 14 tablas, constraints e índices. Las FK de auditoría con dependencia circular (rol/empresa/usuario, vía `created_by`/`updated_by`) se añaden con `op.create_foreign_key()` al final de `upgrade()` — `use_alter=True` dentro de `create_table()` no genera el `ALTER TABLE` por sí solo en Alembic, hay que añadirlo explícito (y su `drop_constraint` correspondiente al inicio de `downgrade()`).
 - `0db12626fe94_seed_catalogo_de_roles.py` — siembra el catálogo de roles (`admin`, `gestor`, `usuario`).
 - `b7f3c21a9d40_seed_empresa_y_usuario_de_sistema.py` — siembra la identidad interna de auditoría para procesos automáticos.
+- `e4a19c7d2b58_indices_de_filtros_de_alerta.py` — índices por `organo_bdns_id`/`region_bdns_id` para la búsqueda inversa del motor de alertas.
 
 Verificado con `alembic upgrade head` → `alembic downgrade base` → `alembic upgrade head` sin errores, contra un PostgreSQL real.
 
@@ -116,6 +117,7 @@ Verificado con `alembic upgrade head` → `alembic downgrade base` → `alembic 
 | Empresas | `GET /empresas`, `POST /empresas`, `GET/PATCH/DELETE /empresas/{id}` |
 | Usuarios | `GET /usuarios`, `POST /usuarios`, `GET/PATCH/DELETE /usuarios/{id}` |
 | Favoritos | `GET /favoritos`, `POST /favoritos`, `GET/PATCH/DELETE /favoritos/{codigo_bdns}` |
+| Alertas | `POST /alertas`, `PATCH/DELETE /alertas/{id}` (el listado y el detalle llegan en la siguiente tarea) |
 
 Convenciones comunes a los listados y las escrituras:
 
@@ -194,6 +196,33 @@ el frontend distingue "acabo de marcarla" de "ya la tenía". Quitar un favorito
 sí es borrado físico (no tiene valor histórico), pero **la convocatoria cacheada
 se conserva**: la comparten alertas y análisis IA.
 
+### Alertas
+
+- **Son personales**, como los favoritos: solo su propietario las edita o
+  borra. Para cualquier otro, admin incluido, una alerta ajena responde 404.
+- **Órganos y regiones se filtran por id del catálogo de la BDNS**, no por
+  texto: el frontend ya tiene esos ids porque consulta la BDNS. Se guardan
+  normalizados (una fila por id en `alerta_organo`/`alerta_region`, sin
+  duplicados), y un id no válido (`0`, negativo o texto) responde 422
+  indicando el campo y el valor recibido.
+- En `PATCH`, `organos`/`regiones` **reemplazan** la lista entera (`[]` la
+  vacía; omitirlos la deja como estaba). Los campos obligatorios no admiten
+  `null`.
+- `DELETE` es **borrado físico** y se lleva el histórico de ejecuciones. Para
+  pausar una alerta sin perderlo: `PATCH` con `"activa": false`.
+
+```json
+POST /alertas
+{
+  "nombre": "Digitalización en Andalucía",
+  "texto_busqueda": "digitalización",
+  "nivel_administracion": "ccaa",
+  "frecuencia": "semanal",
+  "organos": [1500],
+  "regiones": [9]
+}
+```
+
 ### Primer administrador
 
 Crear un usuario exige estar autenticado, y autenticarse exige que ya exista
@@ -216,6 +245,8 @@ alertas, análisis IA en batch).
 
 ```bash
 docker compose exec api pytest
+docker compose exec api ruff check .
+docker compose exec api mypy app
 ```
 
 Los tests de endpoints escriben en una base de datos real (no mocks) y limpian
@@ -232,6 +263,7 @@ app/
   models/          # modelos SQLAlchemy (uno por tabla de schema-subvfy.sql)
   schemas/         # schemas Pydantic de request/response
   api/routes/      # un router por recurso (rol, empresa, usuario, auth, ...)
+  services/        # lógica de negocio sin HTTP (desde alertas)
   core/            # seguridad (JWT/hash), permisos por rol, scheduler
   cli.py           # utilidades de consola (crear el primer admin)
 alembic/           # migraciones
@@ -247,4 +279,4 @@ El desarrollo se organiza como Hito → Funcionalidad → Tarea en `api-hitos-fu
 - Hito 2, Funcionalidad 3 — API de empresa/rol/usuario: **hecho** (schemas Pydantic + CRUD paginado + hashing de contraseñas).
 - Hito 2, Funcionalidad 4 — Autenticación real (JWT): **hecho** (login/refresh/logout/me, autorización por rol, aislamiento multi-tenant, 70 tests contra Postgres real).
 - Hito 3, Funcionalidad 1 — Endpoints de favoritos: **hecho** (marcar/quitar, listado con join a convocatoria, nota personal, 85 tests contra Postgres real).
-- Hito 4, Funcionalidad 1 — CRUD de alertas: **siguiente**.
+- Hito 4, Funcionalidad 1 — CRUD de alertas: **hecho** (crear/editar/eliminar, filtros de órgano y región normalizados por id BDNS).

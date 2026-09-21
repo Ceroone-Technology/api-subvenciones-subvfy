@@ -29,7 +29,7 @@ from sqlalchemy import delete, select
 from app.core.security import crear_access_token, hashear_password
 from app.database import AsyncSessionLocal
 from app.main import app
-from app.models import Convocatoria, Empresa, Rol, Usuario
+from app.models import Alerta, Convocatoria, Empresa, Rol, Usuario
 
 NIF_PREFIJO_TEST = "TEST-"
 # Subdominio de example.com (RFC 2606, nunca entregable) y no un TLD
@@ -141,6 +141,12 @@ async def limpiar_datos_de_test() -> AsyncGenerator[None, None]:
             .where(Convocatoria.codigo_bdns.like(f"{CODIGO_BDNS_PREFIJO_TEST}%"))
             .values(created_by=None, updated_by=None)
         )
+        # Las alertas no pueden esperar a la cascada del usuario: sus filtros
+        # quedan a dos niveles (usuario -> alerta -> alerta_organo) y
+        # Postgres comprueba su FK de auditoría created_by -> usuario antes de
+        # que esa cascada llegue a borrarlos.
+        usuarios_de_test = select(Usuario.id).where(Usuario.email.like(f"%{EMAIL_DOMINIO_TEST}"))
+        await db.execute(delete(Alerta).where(Alerta.usuario_id.in_(usuarios_de_test)))
         # Usuarios primero (sus favoritos caen por ON DELETE CASCADE), luego
         # las convocatorias cacheadas y por ultimo las empresas.
         await db.execute(delete(Usuario).where(Usuario.email.like(f"%{EMAIL_DOMINIO_TEST}")))

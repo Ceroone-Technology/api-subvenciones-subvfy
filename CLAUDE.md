@@ -39,7 +39,7 @@ El desarrollo completo está desglosado en `D:\Trabajo\BigToOne\Subvenciones\api
 - **Hito 2, Funcionalidad 3 — API de empresa/rol/usuario**: hecho. Schemas en `app/schemas/`, routers en `app/api/routes/` (`roles.py`, `empresas.py`, `usuarios.py`), hashing de contraseñas en `app/core/security.py`, 28 tests verdes contra Postgres real.
 - **Hito 2, Funcionalidad 4 — Autenticación real (JWT)**: hecho. JWT en `app/core/security.py`, permisos en `app/core/permisos.py`, router en `app/api/routes/auth.py`, arranque en frío en `app/cli.py`, seed del usuario de sistema en `b7f3c21a9d40`. 70 tests verdes.
 - **Hito 3, Funcionalidad 1 — Endpoints de favoritos**: hecho. Router en `app/api/routes/favoritos.py`, schemas de favorito y convocatoria. 85 tests verdes.
-- **Hito 4, Funcionalidad 1 — CRUD de alertas (10 h)**: **siguiente tarea**. Mutaciones de alerta + normalización de filtros de órgano y región (tablas `alerta`, `alerta_organo`, `alerta_region`).
+- **Hito 4, Funcionalidad 1 — CRUD de alertas (10 h)**: hecho (mutaciones). Router en `app/api/routes/alertas.py`, lógica en `app/services/alertas.py`, normalización de filtros en `app/services/filtros.py`, índices en `e4a19c7d2b58`. 119 tests verdes (34 nuevos), ruff y mypy limpios. Los GET de listado y detalle quedan para la siguiente tarea, y los 404 de alertas aún no están declarados en el OpenAPI (`responses={404: ...}`).
 - Hito 4 (Alertas, 22 h), Hito 5 (Análisis con IA), Hito 6 (Ficha ampliada, sin cambios de backend), Hito 7 (Cierre): pendientes, ver el .docx para el desglose de tareas y horas de cada uno.
 
 ## Cómo correr y verificar
@@ -49,11 +49,17 @@ cp .env.example .env
 docker compose up -d --build
 docker compose exec api alembic upgrade head
 docker compose exec api pytest
+docker compose exec api ruff check .
+docker compose exec api mypy app
 ```
 
 La imagen de `docker-compose.yml` es de desarrollo: instala `requirements-dev.txt` y copia/monta `tests/`, por eso `pytest` corre dentro del contenedor (no hay intérprete con dependencias en el host). El empaquetado de producción (Lambda + Mangum) es del Hito 7 y será distinto.
 
-`GET /roles` con un token válido debe responder 200 con los tres roles sembrados: confirma app + config + conexión a BD + migraciones aplicadas. Antes de dar por cerrada cualquier tarea nueva, correr `pytest` contra una base real (no mocks) — así se detectó el bug de las FKs circulares.
+`GET /roles` con un token válido debe responder 200 con los tres roles sembrados: confirma app + config + conexión a BD + migraciones aplicadas. Antes de dar por cerrada cualquier tarea nueva, correr `pytest` contra una base real (no mocks) — así se detectó el bug de las FKs circulares —, además de `ruff check .` y `mypy app`, que deben salir limpios.
+
+**Tooling (desde Hito 4)**: ruff y mypy se configuran en `pyproject.toml`, que solo contiene configuración de herramientas; las dependencias siguen en `requirements*.txt`. `line-length = 120`, porque es el ancho que ya tenía el código. B008 se permite para `fastapi.Query`/`Depends`, que en la firma es el uso idiomático. Cada `Literal[TUPLA]` lleva un `# type: ignore[valid-type]` puntual: no desactives esa regla globalmente.
+
+**Gotcha de entorno (Windows con Avast)**: el escudo web de Avast intercepta el HTTPS y el `pip install` del build falla con `CERTIFICATE_VERIFY_FAILED`, porque el contenedor no confía en el certificado raíz de Avast. Se resuelve excluyendo `pypi.org` y `files.pythonhosted.org` en Avast, no tocando el `Dockerfile` ni usando `--trusted-host`.
 
 No hay endpoints `/health`: existieron como validación del scaffolding en el Hito 2 Funcionalidad 1 y se retiraron una vez que hubo endpoints de negocio. Si en el Hito 7 hace falta un check de liveness para API Gateway/Lambda, se vuelve a añadir entonces con ese propósito explícito.
 
@@ -103,6 +109,21 @@ De ahí el patrón que estrena `app/api/routes/favoritos.py` y que deben reutili
 - El `set_` del upsert solo incluye los campos **enviados y no nulos** (`exclude_unset` + descarte de `None`). Marcar un favorito desde el listado de resultados manda una ficha incompleta, y sin este filtro se machacarían con NULL los datos de una sincronización anterior. Hay un test que lo fija: `test_un_guardado_parcial_no_borra_datos_ya_cacheados`.
 - Al quitar un favorito **no se borra la convocatoria**: es compartida.
 
-Los recursos que cuelgan del usuario (favoritos) se filtran por `actual.id`, no por `filtro_empresa`. Los que cuelguen de la empresa (alertas, análisis) siguen el patrón multi-tenant de `app/core/permisos.py`. No los mezcles: son dos alcances distintos.
+Los recursos que cuelgan del usuario (favoritos, alertas) se filtran por `actual.id`, no por `filtro_empresa`. Los que cuelguen de la empresa (análisis) siguen el patrón multi-tenant de `app/core/permisos.py`. No los mezcles: son dos alcances distintos.
+
+## Alertas (desde Hito 4, Funcionalidad 1)
+
+Decisiones cerradas con el usuario:
+
+- **Personales**, como favoritos: `alerta.usuario_id` es el propietario y solo él edita o borra. Cualquier otro, admin incluido, recibe 404.
+- **Órganos y regiones son ids del catálogo BDNS** (enteros), no texto: el frontend los tiene porque consulta la BDNS. No hay catálogo propio ni normalización de texto. Si algún día hiciera falta, se expondría un `GET /catalogos/...`, que está propuesto pero no aprobado. "Normalización" aquí significa filas hijas sin duplicados (`normalizar_ids_bdns`, aplicada en los schemas).
+- En `PATCH`, las listas de filtros **reemplazan** a las anteriores. `DELETE` es **borrado físico** (se lleva el histórico de `alerta_ejecucion`); para pausar está `activa`.
+- **Capa de servicios**: las alertas estrenan `app/services/`. El router valida y traduce a HTTP, y el servicio hace el trabajo con excepciones de dominio (`AlertaNoEncontrada`, `RangoFechasInvalido`). Los routers anteriores no se han migrado a este patrón.
+
+**Gotcha**: si en un PATCH solo cambian filas hijas, la fila de `alerta` no queda sucia y el `onupdate` de `updated_at` no salta. Por eso el servicio lanza un `UPDATE` explícito de `updated_at`/`updated_by`, y `_leer` usa `populate_existing` para no devolver el valor viejo del identity map.
+
+**ruff y mypy** están en `requirements-dev.txt`, configurados en `pyproject.toml`: `docker compose exec api ruff check .` y `docker compose exec api mypy app`.
 
 **Gotcha de tests**: el teardown de `tests/conftest.py` tiene que poner a NULL `created_by`/`updated_by` de las convocatorias de prueba **antes** de borrar los usuarios, porque esas columnas apuntan a `usuario.id`. Si añades una tabla nueva que los procesos firmen, va en ese mismo bloque y en ese mismo orden.
+
+**Gotcha de tests (alertas)**: las alertas de prueba se borran **explícitamente antes** que los usuarios, no por la cascada. `alerta_organo`/`alerta_region` quedan a dos niveles (usuario → alerta → hija), y Postgres comprueba su FK de auditoría `created_by → usuario` antes de que la cascada llegue a borrarlas. Sin ese paso, el primer teardown falla y deja restos que tumban la limpieza de todos los tests siguientes (fueron 111 errores). Aplica a cualquier tabla nueva firmada que quede a más de un nivel de cascada del usuario. En producción no pasa, porque los usuarios solo se dan de baja lógica.
