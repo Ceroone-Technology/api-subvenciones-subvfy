@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, String, func
+from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -30,4 +30,6 @@ class Convocatoria(Base, AuditMixin):
     fecha_registro: Mapped[date | None] = mapped_column(Date)
     url_portal_oficial: Mapped[str | None] = mapped_column(String(500))
     financiada_mrr: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
-    sincronizado_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    sincronizado_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

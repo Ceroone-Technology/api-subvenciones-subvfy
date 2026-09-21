@@ -13,7 +13,8 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from app.core.security import PASSWORD_MAX_BYTES, PASSWORD_MIN_LONGITUD
 from app.models.usuario import ESTADOS_USUARIO
 
-EstadoUsuario = Literal[ESTADOS_USUARIO]
+# Literal[tupla] funciona en runtime pero mypy no lo acepta (ver CLAUDE.md): de ahí el ignore.
+EstadoUsuario = Literal[ESTADOS_USUARIO]  # type: ignore[valid-type]
 
 # bcrypt corta a 72 bytes: mejor rechazar con un 422 explícito que aceptar
 # una contraseña que en realidad se trunca sin avisar.

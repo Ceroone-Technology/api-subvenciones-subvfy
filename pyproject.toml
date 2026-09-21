@@ -1,0 +1,30 @@
+# Solo configuración de herramientas: las dependencias siguen en
+# requirements*.txt, que es lo que instala el Dockerfile.
+
+[tool.ruff]
+# 120 y no el 88 por defecto: es el ancho que ya usaba el código existente.
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.flake8-bugbear]
+# `param = Query(...)` en la firma es el uso idiomático de FastAPI, no un
+# valor por defecto mutable compartido.
+extend-immutable-calls = ["fastapi.Query", "fastapi.Depends"]
+
+[tool.ruff.lint.per-file-ignores]
+# Las migraciones siguen la plantilla de Alembic (Union[...], orden de imports).
+"alembic/versions/*" = ["UP", "I", "E501"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+check_untyped_defs = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+# Sin stubs publicados.
+module = ["jose.*", "passlib.*"]
+ignore_missing_imports = true

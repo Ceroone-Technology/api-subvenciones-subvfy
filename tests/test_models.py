@@ -7,7 +7,6 @@ añaden por Funcionalidad a partir de Hito 2, Funcionalidad 3).
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
 from app.models import Empresa, Rol, Usuario

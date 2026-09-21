@@ -49,10 +49,10 @@ async def _cachear_convocatoria(db: DbDep, datos: ConvocatoriaUpsert, usuario_id
         campo: valor for campo, valor in valores.items() if campo != "codigo_bdns" and valor is not None
     }
 
-    sentencia = insert_postgresql(Convocatoria).values(
+    insercion = insert_postgresql(Convocatoria).values(
         **valores, created_by=usuario_id, updated_by=usuario_id
     )
-    sentencia = sentencia.on_conflict_do_update(
+    sentencia = insercion.on_conflict_do_update(
         index_elements=[Convocatoria.codigo_bdns],
         set_={
             **actualizables,

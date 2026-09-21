@@ -10,8 +10,8 @@ from app.models.alerta_ejecucion_convocatoria import AlertaEjecucionConvocatoria
 from app.models.alerta_organo import AlertaOrgano
 from app.models.alerta_region import AlertaRegion
 from app.models.analisis_ia import AnalisisIA
-from app.models.convocatoria import Convocatoria
 from app.models.conversacion_asistente import ConversacionAsistente
+from app.models.convocatoria import Convocatoria
 from app.models.empresa import Empresa
 from app.models.empresa_palabra_clave import EmpresaPalabraClave
 from app.models.favorito import Favorito
