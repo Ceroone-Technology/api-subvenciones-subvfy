@@ -7,7 +7,7 @@ Docs interactivas (OpenAPI): http://localhost:8000/docs
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import auth, empresas, favoritos, roles, usuarios
+from app.api.routes import alertas, auth, empresas, favoritos, roles, usuarios
 from app.config import settings
 
 app = FastAPI(
@@ -29,7 +29,8 @@ app.include_router(roles.router)
 app.include_router(empresas.router)
 app.include_router(usuarios.router)
 app.include_router(favoritos.router)
+app.include_router(alertas.router)
 
-# Los routers de negocio restantes (alertas, análisis IA)
+# Los routers de negocio restantes (análisis IA)
 # se registran aquí a medida que se construyen, uno por Funcionalidad del
 # backlog (api-hitos-funcionalidades-tareas-subvfy.docx).

@@ -9,12 +9,17 @@ bloquearse por el ciclo.
 """
 
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 
 class AuditMixin:
+    if TYPE_CHECKING:
+        # Lo define cada modelo; se declara solo para el type checker, que
+        # si no ve un atributo desconocido en los nombres de FK de abajo.
+        __tablename__: str
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

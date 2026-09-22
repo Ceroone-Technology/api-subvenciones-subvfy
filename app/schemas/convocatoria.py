@@ -14,7 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.convocatoria import NIVELES_ADMINISTRACION
 
-NivelAdministracion = Literal[NIVELES_ADMINISTRACION]
+# Literal[tupla] funciona en runtime pero mypy no lo acepta (ver CLAUDE.md): de ahí el ignore.
+NivelAdministracion = Literal[NIVELES_ADMINISTRACION]  # type: ignore[valid-type]
 CodigoBdns = Annotated[str, Field(min_length=1, max_length=30)]
 
 
