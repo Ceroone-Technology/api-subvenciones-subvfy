@@ -140,15 +140,16 @@ Verificado con `alembic upgrade head` → `alembic downgrade base` → `alembic 
 | Empresas | `GET /empresas`, `POST /empresas`, `GET/PATCH/DELETE /empresas/{id}` |
 | Usuarios | `GET /usuarios`, `POST /usuarios`, `GET/PATCH/DELETE /usuarios/{id}` |
 | Favoritos | `GET /favoritos`, `POST /favoritos`, `GET/PATCH/DELETE /favoritos/{codigo_bdns}` |
-| Alertas | `POST /alertas`, `PATCH/DELETE /alertas/{id}` (el listado y el detalle llegan en la siguiente tarea) |
+| Alertas | `GET /alertas`, `POST /alertas`, `GET/PATCH/DELETE /alertas/{id}` |
 
 Convenciones comunes a los listados y las escrituras:
 
 - **Paginación**: `?page=1&size=20` (`size` máximo 100). La respuesta es
   `{items, total, page, size}`, donde `total` cuenta las filas que cumplen el
   filtro, no las de la página.
-- **Filtros**: `q` (búsqueda por texto), más `estado` en empresas y
-  `empresa_id`/`rol_id`/`estado` en usuarios.
+- **Filtros**: `q` (búsqueda por texto), más `estado` en empresas,
+  `empresa_id`/`rol_id`/`estado` en usuarios y `organo_id`/`region_id`/`activa`
+  en alertas.
 - **PATCH parcial**: solo se aplican los campos presentes en el body.
 - **`DELETE` es baja lógica** (`estado` → `inactiva`/`inactivo`), no borrado
   físico: empresas y usuarios están referenciados por las columnas de
@@ -221,8 +222,17 @@ se conserva**: la comparten alertas y análisis IA.
 
 ### Alertas
 
-- **Son personales**, como los favoritos: solo su propietario las edita o
+- **Son personales**, como los favoritos: solo su propietario las ve, edita o
   borra. Para cualquier otro, admin incluido, una alerta ajena responde 404.
+- **`GET /alertas`** lista las del usuario del token, **más recientes primero**,
+  con la paginación estándar (`page`, `size`). Filtros opcionales:
+  `organo_id`/`region_id` (alertas que *incluyen* ese id BDNS) y `activa`
+  (`true` solo activas, `false` solo pausadas; sin él, todas). Cada alerta
+  trae ya sus `organos`/`regiones`, así que el listado no necesita pedir el
+  detalle de cada una.
+- **`GET /alertas/{id}`** devuelve la alerta con sus filtros, con el mismo
+  schema que el listado (`AlertaRead`). Los filtros son ids: los nombres los
+  pone el frontend con la BDNS.
 - **Órganos y regiones se filtran por id del catálogo de la BDNS**, no por
   texto: el frontend ya tiene esos ids porque consulta la BDNS. Se guardan
   normalizados (una fila por id en `alerta_organo`/`alerta_region`, sin
@@ -305,3 +315,4 @@ El desarrollo se organiza como Hito → Funcionalidad → Tarea en `api-hitos-fu
 - Hito 2, Funcionalidad 4 — Autenticación real (JWT): **hecho** (login/refresh/logout/me, autorización por rol, aislamiento multi-tenant, 70 tests contra Postgres real).
 - Hito 3, Funcionalidad 1 — Endpoints de favoritos: **hecho** (marcar/quitar, listado con join a convocatoria, nota personal, 85 tests contra Postgres real).
 - Hito 4, Funcionalidad 1 — CRUD de alertas: **hecho** (crear/editar/eliminar, filtros de órgano y región normalizados por id BDNS).
+- Hito 4 — Listado y detalle de alertas: **hecho** (paginado, filtros por órgano/región/activa, sin N+1, 142 tests contra Postgres real).
