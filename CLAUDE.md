@@ -42,6 +42,32 @@ El desarrollo completo está desglosado en `D:\Trabajo\BigToOne\Subvenciones\api
 - **Hito 4, Funcionalidad 1 — CRUD de alertas (10 h)**: hecho (mutaciones). Router en `app/api/routes/alertas.py`, lógica en `app/services/alertas.py`, normalización de filtros en `app/services/filtros.py`, índices en `e4a19c7d2b58`. 119 tests verdes (34 nuevos), ruff y mypy limpios. Los GET de listado y detalle quedan para la siguiente tarea, y los 404 de alertas aún no están declarados en el OpenAPI (`responses={404: ...}`).
 - Hito 4 (Alertas, 22 h), Hito 5 (Análisis con IA), Hito 6 (Ficha ampliada, sin cambios de backend), Hito 7 (Cierre): pendientes, ver el .docx para el desglose de tareas y horas de cada uno.
 
+## Flujo de ramas (decisión cerrada, desde el 22/09/2026)
+
+**No se sube a `main`.** La rama de integración es **`develop`**.
+
+- Todo el trabajo se integra en `develop`: las ramas salen de `develop` y el PR va **contra `develop`**.
+- `main` está protegida: solo recibe PRs **desde `develop`**, y solo con el CI en verde. No acepta push directo.
+- **CI en cada PR** (`.github/workflows/ci.yml`, GitHub Actions): `alembic upgrade head`, `ruff check .`, `mypy app` y `pytest -q` contra un PostgreSQL 16 real. Se lanza en los PRs y en los push a `develop`/`main`. Si falla algo, el PR no se puede mergear.
+
+```bash
+git fetch origin
+git checkout develop
+git pull
+git checkout -b feature/lo-que-toque
+# ... trabajo, commits ...
+git push -u origin feature/lo-que-toque
+# abrir el PR contra develop, no contra main
+```
+
+Reglas para Claude Code en este repo:
+- Nunca hagas push a `main`, ni directo ni con un PR desde una rama de feature. Al crear un PR, `--base develop` siempre de forma explícita: el default del repo en GitHub sigue siendo `main`.
+- Antes de empezar una tarea, crea la rama desde `origin/develop` actualizado, no desde `main`.
+- Si hay que rebasar una rama ya publicada, pregunta primero y usa `git push --force-with-lease`, nunca `--force` a secas.
+- Antes de abrir el PR, corre en local lo mismo que el CI (ver la sección siguiente). Así no descubres en el PR lo que podías ver antes.
+
+**Ojo con la versión de Python**: el CI usa **Python 3.11**, mientras que el `Dockerfile` usa 3.12 y `pyproject.toml` apunta a `py312`. Que algo pase en local no garantiza que pase en el CI. No uses sintaxis exclusiva de 3.12 (p. ej. `type X = ...` o genéricos PEP 695), aunque ruff la sugiera.
+
 ## Cómo correr y verificar
 
 ```bash

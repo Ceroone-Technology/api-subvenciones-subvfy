@@ -6,6 +6,28 @@ API de `app-subvenciones-subvfy`: favoritos, alertas, autenticación y análisis
 
 FastAPI + SQLAlchemy 2.0 (async) + Alembic + Pydantic v2, sobre PostgreSQL (asyncpg). JWT para autenticación, APScheduler para el motor de Alertas, Anthropic SDK para Análisis con IA y Asistente IA conversacional. Las decisiones cerradas (stack, arquitectura cloud, modelo de permisos, gotchas ya resueltos) están en `CLAUDE.md`.
 
+## Flujo de ramas
+
+**No se sube a `main`.** La rama de integración es **`develop`**.
+
+- **`develop`** es donde se integra todo el trabajo. Las ramas salen de `develop` y el PR va contra `develop`.
+- **`main`** está protegida: solo recibe PRs desde `develop`, y solo con el CI en verde. No acepta push directo.
+- **CI en cada PR** (GitHub Actions, `.github/workflows/ci.yml`): migraciones, pytest, ruff y mypy contra un PostgreSQL real. Si algo falla, el PR no se puede mergear.
+
+```bash
+git fetch origin
+git checkout develop
+git pull
+git checkout -b feature/lo-que-toque
+
+# ... trabajo, commits ...
+
+git push -u origin feature/lo-que-toque
+# abrir el PR contra develop, no contra main
+```
+
+Al abrir el PR en GitHub, comprueba que el desplegable **base:** diga `develop`: por defecto propone `main`. Antes de subir, pasa en local lo mismo que el CI (ver [Tests](#tests)).
+
 ## Arranque con Docker
 
 Lo único que necesitas instalado es **Docker Desktop**. Ni Python ni PostgreSQL: ambos van dentro de los contenedores.
@@ -15,6 +37,7 @@ Lo único que necesitas instalado es **Docker Desktop**. Ni Python ni PostgreSQL
 ```bash
 git clone https://github.com/Ceroone-Technology/api-subvenciones-subvfy.git
 cd api-subvenciones-subvfy
+git checkout develop        # la rama de trabajo; main solo recibe lo ya integrado
 
 # 1. Configuración. El .env real nunca se sube: está en .gitignore.
 cp .env.example .env
@@ -248,6 +271,8 @@ docker compose exec api pytest
 docker compose exec api ruff check .
 docker compose exec api mypy app
 ```
+
+Son las mismas comprobaciones que ejecuta el CI en cada PR: si fallan aquí, el PR no se podrá mergear. Ojo: el CI usa Python 3.11 y la imagen de Docker 3.12, así que evita la sintaxis exclusiva de 3.12.
 
 Los tests de endpoints escriben en una base de datos real (no mocks) y limpian
 sus filas al terminar; para poder distinguirlas usan NIFs con prefijo `TEST-` y
