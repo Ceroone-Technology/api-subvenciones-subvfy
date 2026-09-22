@@ -6,6 +6,28 @@ API de `app-subvenciones-subvfy`: favoritos, alertas, autenticación y análisis
 
 FastAPI + SQLAlchemy 2.0 (async) + Alembic + Pydantic v2, sobre PostgreSQL (asyncpg). JWT para autenticación, APScheduler para el motor de Alertas, Anthropic SDK para Análisis con IA y Asistente IA conversacional. Las decisiones cerradas (stack, arquitectura cloud, modelo de permisos, gotchas ya resueltos) están en `CLAUDE.md`.
 
+## Flujo de ramas
+
+**No se sube a `main`.** La rama de integración es **`develop`**.
+
+- **`develop`** es donde se integra todo el trabajo. Las ramas salen de `develop` y el PR va contra `develop`.
+- **`main`** está protegida: solo recibe PRs desde `develop`, y solo con el CI en verde. No acepta push directo.
+- **CI en cada PR** (GitHub Actions, `.github/workflows/ci.yml`): migraciones, pytest, ruff y mypy contra un PostgreSQL real. Si algo falla, el PR no se puede mergear.
+
+```bash
+git fetch origin
+git checkout develop
+git pull
+git checkout -b feature/lo-que-toque
+
+# ... trabajo, commits ...
+
+git push -u origin feature/lo-que-toque
+# abrir el PR contra develop, no contra main
+```
+
+Al abrir el PR en GitHub, comprueba que el desplegable **base:** diga `develop`: por defecto propone `main`. Antes de subir, pasa en local lo mismo que el CI (ver [Tests](#tests)).
+
 ## Arranque con Docker
 
 Lo único que necesitas instalado es **Docker Desktop**. Ni Python ni PostgreSQL: ambos van dentro de los contenedores.
@@ -15,6 +37,7 @@ Lo único que necesitas instalado es **Docker Desktop**. Ni Python ni PostgreSQL
 ```bash
 git clone https://github.com/Ceroone-Technology/api-subvenciones-subvfy.git
 cd api-subvenciones-subvfy
+git checkout develop        # la rama de trabajo; main solo recibe lo ya integrado
 
 # 1. Configuración. El .env real nunca se sube: está en .gitignore.
 cp .env.example .env
@@ -117,15 +140,16 @@ Verificado con `alembic upgrade head` → `alembic downgrade base` → `alembic 
 | Empresas | `GET /empresas`, `POST /empresas`, `GET/PATCH/DELETE /empresas/{id}` |
 | Usuarios | `GET /usuarios`, `POST /usuarios`, `GET/PATCH/DELETE /usuarios/{id}` |
 | Favoritos | `GET /favoritos`, `POST /favoritos`, `GET/PATCH/DELETE /favoritos/{codigo_bdns}` |
-| Alertas | `POST /alertas`, `PATCH/DELETE /alertas/{id}` (el listado y el detalle llegan en la siguiente tarea) |
+| Alertas | `GET /alertas`, `POST /alertas`, `GET/PATCH/DELETE /alertas/{id}` |
 
 Convenciones comunes a los listados y las escrituras:
 
 - **Paginación**: `?page=1&size=20` (`size` máximo 100). La respuesta es
   `{items, total, page, size}`, donde `total` cuenta las filas que cumplen el
   filtro, no las de la página.
-- **Filtros**: `q` (búsqueda por texto), más `estado` en empresas y
-  `empresa_id`/`rol_id`/`estado` en usuarios.
+- **Filtros**: `q` (búsqueda por texto), más `estado` en empresas,
+  `empresa_id`/`rol_id`/`estado` en usuarios y `organo_id`/`region_id`/`activa`
+  en alertas.
 - **PATCH parcial**: solo se aplican los campos presentes en el body.
 - **`DELETE` es baja lógica** (`estado` → `inactiva`/`inactivo`), no borrado
   físico: empresas y usuarios están referenciados por las columnas de
@@ -198,8 +222,17 @@ se conserva**: la comparten alertas y análisis IA.
 
 ### Alertas
 
-- **Son personales**, como los favoritos: solo su propietario las edita o
+- **Son personales**, como los favoritos: solo su propietario las ve, edita o
   borra. Para cualquier otro, admin incluido, una alerta ajena responde 404.
+- **`GET /alertas`** lista las del usuario del token, **más recientes primero**,
+  con la paginación estándar (`page`, `size`). Filtros opcionales:
+  `organo_id`/`region_id` (alertas que *incluyen* ese id BDNS) y `activa`
+  (`true` solo activas, `false` solo pausadas; sin él, todas). Cada alerta
+  trae ya sus `organos`/`regiones`, así que el listado no necesita pedir el
+  detalle de cada una.
+- **`GET /alertas/{id}`** devuelve la alerta con sus filtros, con el mismo
+  schema que el listado (`AlertaRead`). Los filtros son ids: los nombres los
+  pone el frontend con la BDNS.
 - **Órganos y regiones se filtran por id del catálogo de la BDNS**, no por
   texto: el frontend ya tiene esos ids porque consulta la BDNS. Se guardan
   normalizados (una fila por id en `alerta_organo`/`alerta_region`, sin
@@ -249,6 +282,8 @@ docker compose exec api ruff check .
 docker compose exec api mypy app
 ```
 
+Son las mismas comprobaciones que ejecuta el CI en cada PR: si fallan aquí, el PR no se podrá mergear. Ojo: el CI usa Python 3.11 y la imagen de Docker 3.12, así que evita la sintaxis exclusiva de 3.12.
+
 Los tests de endpoints escriben en una base de datos real (no mocks) y limpian
 sus filas al terminar; para poder distinguirlas usan NIFs con prefijo `TEST-` y
 emails bajo `@test.subvfy.example.com`.
@@ -280,3 +315,4 @@ El desarrollo se organiza como Hito → Funcionalidad → Tarea en `api-hitos-fu
 - Hito 2, Funcionalidad 4 — Autenticación real (JWT): **hecho** (login/refresh/logout/me, autorización por rol, aislamiento multi-tenant, 70 tests contra Postgres real).
 - Hito 3, Funcionalidad 1 — Endpoints de favoritos: **hecho** (marcar/quitar, listado con join a convocatoria, nota personal, 85 tests contra Postgres real).
 - Hito 4, Funcionalidad 1 — CRUD de alertas: **hecho** (crear/editar/eliminar, filtros de órgano y región normalizados por id BDNS).
+- Hito 4 — Listado y detalle de alertas: **hecho** (paginado, filtros por órgano/región/activa, sin N+1, 142 tests contra Postgres real).

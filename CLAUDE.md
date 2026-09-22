@@ -39,8 +39,35 @@ El desarrollo completo está desglosado en `D:\Trabajo\BigToOne\Subvenciones\api
 - **Hito 2, Funcionalidad 3 — API de empresa/rol/usuario**: hecho. Schemas en `app/schemas/`, routers en `app/api/routes/` (`roles.py`, `empresas.py`, `usuarios.py`), hashing de contraseñas en `app/core/security.py`, 28 tests verdes contra Postgres real.
 - **Hito 2, Funcionalidad 4 — Autenticación real (JWT)**: hecho. JWT en `app/core/security.py`, permisos en `app/core/permisos.py`, router en `app/api/routes/auth.py`, arranque en frío en `app/cli.py`, seed del usuario de sistema en `b7f3c21a9d40`. 70 tests verdes.
 - **Hito 3, Funcionalidad 1 — Endpoints de favoritos**: hecho. Router en `app/api/routes/favoritos.py`, schemas de favorito y convocatoria. 85 tests verdes.
-- **Hito 4, Funcionalidad 1 — CRUD de alertas (10 h)**: hecho (mutaciones). Router en `app/api/routes/alertas.py`, lógica en `app/services/alertas.py`, normalización de filtros en `app/services/filtros.py`, índices en `e4a19c7d2b58`. 119 tests verdes (34 nuevos), ruff y mypy limpios. Los GET de listado y detalle quedan para la siguiente tarea, y los 404 de alertas aún no están declarados en el OpenAPI (`responses={404: ...}`).
+- **Hito 4, Funcionalidad 1 — CRUD de alertas (10 h)**: hecho (mutaciones). Router en `app/api/routes/alertas.py`, lógica en `app/services/alertas.py`, normalización de filtros en `app/services/filtros.py`, índices en `e4a19c7d2b58`. 119 tests verdes (34 nuevos), ruff y mypy limpios.
+- **Hito 4 — Listado y detalle de alertas**: hecho. `GET /alertas` (paginado con `PaginacionDep`/`Pagina[T]`, filtros `organo_id`/`region_id`/`activa`) y `GET /alertas/{id}` en el mismo router y servicio; los 404 están declarados en el OpenAPI del detalle, el PATCH y el DELETE. 142 tests verdes (23 nuevos en `tests/test_alertas_listado.py`), ruff y mypy limpios.
 - Hito 4 (Alertas, 22 h), Hito 5 (Análisis con IA), Hito 6 (Ficha ampliada, sin cambios de backend), Hito 7 (Cierre): pendientes, ver el .docx para el desglose de tareas y horas de cada uno.
+
+## Flujo de ramas (decisión cerrada, desde el 22/09/2026)
+
+**No se sube a `main`.** La rama de integración es **`develop`**.
+
+- Todo el trabajo se integra en `develop`: las ramas salen de `develop` y el PR va **contra `develop`**.
+- `main` está protegida: solo recibe PRs **desde `develop`**, y solo con el CI en verde. No acepta push directo.
+- **CI en cada PR** (`.github/workflows/ci.yml`, GitHub Actions): `alembic upgrade head`, `ruff check .`, `mypy app` y `pytest -q` contra un PostgreSQL 16 real. Se lanza en los PRs y en los push a `develop`/`main`. Si falla algo, el PR no se puede mergear.
+
+```bash
+git fetch origin
+git checkout develop
+git pull
+git checkout -b feature/lo-que-toque
+# ... trabajo, commits ...
+git push -u origin feature/lo-que-toque
+# abrir el PR contra develop, no contra main
+```
+
+Reglas para Claude Code en este repo:
+- Nunca hagas push a `main`, ni directo ni con un PR desde una rama de feature. Al crear un PR, `--base develop` siempre de forma explícita: el default del repo en GitHub sigue siendo `main`.
+- Antes de empezar una tarea, crea la rama desde `origin/develop` actualizado, no desde `main`.
+- Si hay que rebasar una rama ya publicada, pregunta primero y usa `git push --force-with-lease`, nunca `--force` a secas.
+- Antes de abrir el PR, corre en local lo mismo que el CI (ver la sección siguiente). Así no descubres en el PR lo que podías ver antes.
+
+**Ojo con la versión de Python**: el CI usa **Python 3.11**, mientras que el `Dockerfile` usa 3.12 y `pyproject.toml` apunta a `py312`. Que algo pase en local no garantiza que pase en el CI. No uses sintaxis exclusiva de 3.12 (p. ej. `type X = ...` o genéricos PEP 695), aunque ruff la sugiera.
 
 ## Cómo correr y verificar
 
@@ -119,6 +146,9 @@ Decisiones cerradas con el usuario:
 - **Órganos y regiones son ids del catálogo BDNS** (enteros), no texto: el frontend los tiene porque consulta la BDNS. No hay catálogo propio ni normalización de texto. Si algún día hiciera falta, se expondría un `GET /catalogos/...`, que está propuesto pero no aprobado. "Normalización" aquí significa filas hijas sin duplicados (`normalizar_ids_bdns`, aplicada en los schemas).
 - En `PATCH`, las listas de filtros **reemplazan** a las anteriores. `DELETE` es **borrado físico** (se lleva el histórico de `alerta_ejecucion`); para pausar está `activa`.
 - **Capa de servicios**: las alertas estrenan `app/services/`. El router valida y traduce a HTTP, y el servicio hace el trabajo con excepciones de dominio (`AlertaNoEncontrada`, `RangoFechasInvalido`). Los routers anteriores no se han migrado a este patrón.
+
+- **Listado sin N+1**: `AlertaRead` se monta siempre con `_con_filtros(db, alertas)`, que resuelve los filtros de una página entera con **dos consultas `IN (ids)`**. El modelo `Alerta` no tiene `relationship()` a propósito, para que no haya lazy-loads en async. Una petición de listado hace un número fijo de consultas (auth + count + página + órganos + regiones), y `test_sin_n_mas_1_con_200_alertas` lo fija contando las sentencias SQL con `event.listen(engine.sync_engine, "before_cursor_execute", ...)`. No consultes las tablas hijas alerta por alerta.
+- **Orden del listado**: `created_at DESC, id DESC`. El `id` desempata las alertas creadas en la misma transacción, que comparten `created_at`; sin él, la paginación puede repetir o saltarse filas.
 
 **Gotcha**: si en un PATCH solo cambian filas hijas, la fila de `alerta` no queda sucia y el `onupdate` de `updated_at` no salta. Por eso el servicio lanza un `UPDATE` explícito de `updated_at`/`updated_by`, y `_leer` usa `populate_existing` para no devolver el valor viejo del identity map.
 
