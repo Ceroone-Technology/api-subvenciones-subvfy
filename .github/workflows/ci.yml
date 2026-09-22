@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: subvfy
+          POSTGRES_PASSWORD: subvfy
+          POSTGRES_DB: subvfy
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://subvfy:subvfy@localhost:5432/subvfy
+      ENVIRONMENT: development
+      JWT_SECRET_KEY: ci-only-secret
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: "60"
+      REFRESH_TOKEN_EXPIRE_DAYS: "30"
+      CORS_ORIGINS: http://localhost:4200
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements-dev.txt
+
+      - name: Migraciones (alembic upgrade head)
+        run: python -m alembic upgrade head
+
+      - name: ruff
+        run: python -m ruff check .
+
+      - name: mypy
+        run: python -m mypy app
+
+      - name: pytest
+        run: python -m pytest -q
