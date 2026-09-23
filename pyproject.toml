@@ -26,5 +26,5 @@ warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
 # Sin stubs publicados.
-module = ["jose.*", "passlib.*"]
+module = ["jose.*", "passlib.*", "boto3.*", "botocore.*"]
 ignore_missing_imports = true

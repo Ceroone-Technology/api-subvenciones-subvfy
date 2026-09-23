@@ -14,4 +14,7 @@ passlib[bcrypt]==1.7.4
 # pin un build limpio instala bcrypt 5.x y el hashing de contraseñas revienta.
 bcrypt==4.2.1
 anthropic==0.42.0
+# Cliente de Amazon SES para las notificaciones de alertas. En Lambda ya
+# viene en el runtime, pero se fija igualmente para que local y CI coincidan.
+boto3==1.43.100
 apscheduler==3.10.4

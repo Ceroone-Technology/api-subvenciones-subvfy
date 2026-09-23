@@ -223,6 +223,36 @@ POST /alertas
 }
 ```
 
+## Notificaciones de alertas por email
+
+Cuando una ejecución de alerta encuentra convocatorias nuevas, se avisa al
+**dueño de la alerta** (las alertas son personales, como los favoritos) y se
+registra el resultado en `alerta_ejecucion`.
+
+| Variable | Para qué |
+|---|---|
+| `EMAIL_BACKEND` | `consola` (por defecto) escribe el correo en el log sin enviarlo; `ses` envía de verdad por Amazon SES. |
+| `EMAIL_REMITENTE` / `EMAIL_REMITENTE_NOMBRE` | Dirección y nombre del remitente. El dominio debe estar verificado en SES. |
+| `EMAIL_MAX_CONVOCATORIAS` | Cuántas se listan antes de cortar con un "y otras N más". |
+| `AWS_REGION` | Región de SES. |
+| `FRONTEND_BASE_URL` | Base de los enlaces del correo. |
+| `FRONTEND_RUTA_CONVOCATORIA` | Plantilla de la ruta de la ficha, con `{codigo_bdns}`. **Ajustar al routing real del Angular.** |
+| `FRONTEND_RUTA_ALERTAS` | Ruta de la pantalla de alertas (pie del correo). |
+
+El valor por defecto de `EMAIL_BACKEND` es `consola` a propósito: ningún
+entorno manda correo real sin pedirlo explícitamente.
+
+Estados que registra `alerta_ejecucion.estado_envio`:
+
+- `sin_novedades` — la alerta se evaluó y no había nada nuevo. No se envía correo.
+- `enviado` — aviso entregado al proveedor (o canal `plataforma`, donde la propia ejecución es el aviso).
+- `error` — había novedades pero no se pudo avisar. El motivo queda en `detalle_error`.
+
+Para producción en SES hacen falta dos cosas que no dependen del código:
+verificar el dominio del remitente (SPF y DKIM) y **sacar la cuenta del
+sandbox de SES**, porque dentro de él solo se puede escribir a direcciones
+verificadas.
+
 ### Primer administrador
 
 Crear un usuario exige estar autenticado, y autenticarse exige que ya exista

@@ -31,6 +31,23 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-5"
 
+    # Notificaciones por email (Hito 4, Funcionalidad 3)
+    # "consola" solo escribe el correo en el log: es el valor por defecto a
+    # propósito, para que ningún entorno mande correo real sin pedirlo.
+    email_backend: str = "consola"
+    email_remitente: str = "alertas@subvfy.es"
+    email_remitente_nombre: str = "Subvfy"
+    # Cuántas convocatorias se listan en el correo antes de cortar con un
+    # "y otras N más": un digest semanal puede traer decenas.
+    email_max_convocatorias: int = 10
+    aws_region: str = "eu-west-1"
+
+    # Enlaces del correo hacia el frontend Angular. La ruta es una plantilla
+    # con {codigo_bdns}; ajustar al routing real de la app.
+    frontend_base_url: str = "http://localhost:4200"
+    frontend_ruta_convocatoria: str = "/convocatorias/{codigo_bdns}"
+    frontend_ruta_alertas: str = "/alertas"
+
     # CORS — orígenes permitidos, separados por coma
     cors_origins: str = "http://localhost:4200"
 

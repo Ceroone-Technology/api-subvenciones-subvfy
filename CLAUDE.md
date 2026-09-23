@@ -127,3 +127,24 @@ Decisiones cerradas con el usuario:
 **Gotcha de tests**: el teardown de `tests/conftest.py` tiene que poner a NULL `created_by`/`updated_by` de las convocatorias de prueba **antes** de borrar los usuarios, porque esas columnas apuntan a `usuario.id`. Si añades una tabla nueva que los procesos firmen, va en ese mismo bloque y en ese mismo orden.
 
 **Gotcha de tests (alertas)**: las alertas de prueba se borran **explícitamente antes** que los usuarios, no por la cascada. `alerta_organo`/`alerta_region` quedan a dos niveles (usuario → alerta → hija), y Postgres comprueba su FK de auditoría `created_by → usuario` antes de que la cascada llegue a borrarlas. Sin ese paso, el primer teardown falla y deja restos que tumban la limpieza de todos los tests siguientes (fueron 111 errores). Aplica a cualquier tabla nueva firmada que quede a más de un nivel de cascada del usuario. En producción no pasa, porque los usuarios solo se dan de baja lógica.
+
+## Notificaciones de alertas (desde Hito 4, Funcionalidad 3)
+
+Decisiones cerradas con el usuario — no las reabras sin preguntar:
+
+- **Proveedor: Amazon SES**, por coherencia con el despliegue en AWS ya decidido. `EMAIL_BACKEND` elige entre `consola` (por defecto, solo log) y `ses`. El defecto es `consola` para que ningún entorno mande correo real por descuido.
+- **Los enlaces del correo llevan a la ficha dentro de Subvfy**, no al portal de la BDNS: el aviso devuelve al usuario al producto. Las rutas son configurables (`FRONTEND_RUTA_*`) porque **no se han contrastado con el routing real del Angular** — el frontend no estaba en la máquina. Verifícalas antes de enviar nada en producción.
+- **HTML con marca + alternativa en texto plano**, siempre las dos partes.
+- **Destinatario: el dueño de la alerta** (`alerta.usuario_id`). Las alertas son personales, como los favoritos.
+
+Tres invariantes que sostienen los tests y conviene no romper:
+
+- **La ejecución se registra pase lo que pase.** Un fallo del proveedor **no se propaga**: se guarda `estado_envio = "error"` con el detalle. Si se relanzara, un SES caído tumbaría la pasada entera de alertas y se perdería el rastro de que se evaluaron.
+- **Las convocatorias notificadas se persisten aunque el envío falle**, en `alerta_ejecucion_convocatoria`. Es lo que impide re-avisar de lo mismo; si se quiere reintentar, la decisión es del motor (F2), no de este servicio.
+- **Una cuenta no activa cuenta como `error`, no como silencio.** Si alguien deja de recibir avisos por estar bloqueado, tiene que verse en el historial de la alerta.
+
+**`enviar()` es síncrono a propósito** (boto3 bloquea y no tiene versión async); el servicio lo saca del event loop con `asyncio.to_thread`. No lo envuelvas en una corrutina falsa.
+
+**Firma de auditoría**: las filas que escribe el motor llevan `created_by`/`updated_by` del usuario de sistema, vía `app/services/auditoria.py`. Es justo para lo que se sembró en `b7f3c21a9d40`. Cualquier proceso automático futuro (sync BDNS, análisis IA en batch) debe usar `id_usuario_sistema()` en vez de inventarse un autor.
+
+**Pendiente de infraestructura, no de código**: verificar el dominio del remitente en SES (SPF/DKIM) y sacar la cuenta del sandbox, donde solo se puede escribir a direcciones verificadas.

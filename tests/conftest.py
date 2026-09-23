@@ -112,6 +112,37 @@ async def crear_sesion_en_bd(
         )
 
 
+async def crear_convocatoria_en_bd(titulo: str = "Ayudas a la digitalización", **extra) -> Convocatoria:
+    """Siembra una fila de la caché local de convocatorias.
+
+    Los favoritos la crean por la API al marcarlos, pero alertas y análisis
+    la necesitan ya existente: la devuelve desasociada de la sesión, así que
+    quien la use debe recargarla en la suya (o quedarse con el id).
+    """
+    async with AsyncSessionLocal() as db:
+        convocatoria = Convocatoria(codigo_bdns=codigo_bdns_de_prueba(), titulo=titulo, **extra)
+        db.add(convocatoria)
+        await db.commit()
+        await db.refresh(convocatoria)
+        db.expunge(convocatoria)
+        return convocatoria
+
+
+async def crear_alerta_en_bd(usuario_id: int, **extra) -> int:
+    """Devuelve el id: la alerta se recarga en la sesión donde vaya a usarse."""
+    async with AsyncSessionLocal() as db:
+        alerta = Alerta(
+            usuario_id=usuario_id,
+            nombre=extra.pop("nombre", "Alerta de prueba"),
+            created_by=usuario_id,
+            updated_by=usuario_id,
+            **extra,
+        )
+        db.add(alerta)
+        await db.commit()
+        return alerta.id
+
+
 @pytest_asyncio.fixture
 async def client() -> AsyncGenerator[AsyncClient, None]:
     """Cliente sin autenticar. Solo para los tests de 401."""
