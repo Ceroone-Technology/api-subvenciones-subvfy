@@ -13,10 +13,17 @@ from pydantic import ValidationError
 from sqlalchemy import select
 
 from app.database import AsyncSessionLocal
-from app.models import Alerta, AlertaOrgano, AlertaRegion
+from app.models import (
+    Alerta,
+    AlertaEjecucion,
+    AlertaEjecucionConvocatoria,
+    AlertaOrgano,
+    AlertaRegion,
+    Convocatoria,
+)
 from app.schemas.alerta import MAX_FILTROS, AlertaCreate, AlertaUpdate
 from app.services.filtros import normalizar_ids_bdns
-from tests.conftest import Sesion, crear_sesion_en_bd
+from tests.conftest import Sesion, codigo_bdns_de_prueba, crear_sesion_en_bd
 
 ID_INEXISTENTE = 2**62
 
@@ -269,3 +276,149 @@ async def test_alertas_exige_token(client: AsyncClient) -> None:
     assert (await client.post("/alertas", json=_alerta())).status_code == 401
     assert (await client.patch("/alertas/1", json={"nombre": "x"})).status_code == 401
     assert (await client.delete("/alertas/1")).status_code == 401
+
+
+# --- Validaciones de campo por HTTP -------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("campo", "valor"),
+    [
+        ("nombre", ""),
+        ("nombre", "x" * 151),
+        ("texto_busqueda", "x" * 301),
+        ("nivel_administracion", "galactico"),
+        ("canal_notificacion", "paloma_mensajera"),
+        ("organos", list(range(1, MAX_FILTROS + 2))),
+    ],
+)
+async def test_crear_alerta_con_campo_invalido(
+    client_gestor: AsyncClient, campo: str, valor: object
+) -> None:
+    """Los límites del schema también se cumplen entrando por la API, no solo
+    al construir el modelo Pydantic a mano."""
+    respuesta = await client_gestor.post("/alertas", json=_alerta(**{campo: valor}))
+    assert respuesta.status_code == 422, respuesta.text
+    assert respuesta.json()["detail"][0]["loc"][:2] == ["body", campo]
+
+
+async def test_crear_alerta_en_el_limite_de_los_campos(client_gestor: AsyncClient) -> None:
+    """La frontera de lo válido: 150 caracteres y MAX_FILTROS órganos entran."""
+    creada = await _crear(
+        client_gestor,
+        nombre="x" * 150,
+        texto_busqueda="y" * 300,
+        organos=list(range(1, MAX_FILTROS + 1)),
+    )
+    assert len(creada["nombre"]) == 150
+    assert len(creada["organos"]) == MAX_FILTROS
+
+
+# --- Eliminar: el histórico de ejecuciones ------------------------------
+
+
+async def test_eliminar_alerta_se_lleva_su_historial(client_gestor: AsyncClient) -> None:
+    """El borrado es físico y arrastra `alerta_ejecucion` y su tabla
+    intermedia (dos niveles de cascada). La convocatoria cacheada, en cambio,
+    sobrevive: es compartida, igual que en favoritos."""
+    creada = await _crear(client_gestor)
+    codigo = codigo_bdns_de_prueba()
+    async with AsyncSessionLocal() as db:
+        convocatoria = Convocatoria(codigo_bdns=codigo, titulo="Detectada por la alerta")
+        db.add(convocatoria)
+        ejecuciones = [
+            AlertaEjecucion(alerta_id=creada["id"], estado_envio=estado, convocatorias_encontradas=n)
+            for estado, n in (("enviado", 1), ("sin_novedades", 0))
+        ]
+        db.add_all(ejecuciones)
+        await db.flush()
+        db.add(
+            AlertaEjecucionConvocatoria(
+                alerta_ejecucion_id=ejecuciones[0].id, convocatoria_id=convocatoria.id
+            )
+        )
+        await db.commit()
+        ids_ejecucion = [ejecucion.id for ejecucion in ejecuciones]
+
+    assert (await client_gestor.delete(f"/alertas/{creada['id']}")).status_code == 204
+
+    async with AsyncSessionLocal() as db:
+        quedan = await db.scalars(
+            select(AlertaEjecucion.id).where(AlertaEjecucion.alerta_id == creada["id"])
+        )
+        quedan_convocatorias = await db.scalars(
+            select(AlertaEjecucionConvocatoria.id).where(
+                AlertaEjecucionConvocatoria.alerta_ejecucion_id.in_(ids_ejecucion)
+            )
+        )
+        sigue_cacheada = await db.scalar(
+            select(Convocatoria.id).where(Convocatoria.codigo_bdns == codigo)
+        )
+    assert list(quedan) == []
+    assert list(quedan_convocatorias) == []
+    assert sigue_cacheada is not None
+
+
+# --- El rol usuario ----------------------------------------------------
+
+
+async def test_un_usuario_raso_gestiona_sus_propias_alertas(
+    client_usuario: AsyncClient, usuario_raso: Sesion
+) -> None:
+    """Las alertas solo exigen estar autenticado, no ser gestor ni admin: son
+    personales. Si alguien pusiera aquí GestorDep, este test se pondría rojo."""
+    creada = await _crear(client_usuario, regiones=[9])
+    assert creada["usuario_id"] == usuario_raso.id
+
+    listado = await client_usuario.get("/alertas")
+    assert [item["id"] for item in listado.json()["items"]] == [creada["id"]]
+
+    editada = await client_usuario.patch(f"/alertas/{creada['id']}", json={"activa": False})
+    assert editada.status_code == 200
+    assert editada.json()["activa"] is False
+    assert (await client_usuario.delete(f"/alertas/{creada['id']}")).status_code == 204
+
+
+async def test_un_usuario_raso_no_alcanza_la_alerta_de_un_companero(
+    client_usuario: AsyncClient, client_gestor: AsyncClient
+) -> None:
+    """Los dos comparten empresa (misma fixture), y aun así no se ven las
+    alertas: cuelgan del usuario, no de la empresa."""
+    ajena = await _crear(client_gestor)
+
+    assert (await client_usuario.get("/alertas")).json()["total"] == 0
+    assert (await client_usuario.get(f"/alertas/{ajena['id']}")).status_code == 404
+    assert (await client_usuario.patch(f"/alertas/{ajena['id']}", json={"nombre": "x"})).status_code == 404
+    assert (await client_usuario.delete(f"/alertas/{ajena['id']}")).status_code == 404
+
+
+# --- El propietario no se secuestra por el body -------------------------
+
+
+async def test_el_body_no_puede_asignar_la_alerta_a_otro(
+    client_gestor: AsyncClient, gestor: Sesion, empresa: dict
+) -> None:
+    """`usuario_id` no está en AlertaCreate/AlertaUpdate: el propietario sale
+    siempre del token. Mandarlo en el body no lo cambia ni al crear ni al
+    editar, y la alerta no aparece en el listado del otro usuario."""
+    otro = await crear_sesion_en_bd(empresa["id"], "usuario")
+
+    creada = await _crear(client_gestor, usuario_id=otro.id)
+    assert creada["usuario_id"] == gestor.id
+
+    editada = await client_gestor.patch(
+        f"/alertas/{creada['id']}", json={"nombre": "Sigue siendo mía", "usuario_id": otro.id, "id": 999}
+    )
+    assert editada.status_code == 200
+    assert editada.json()["id"] == creada["id"]
+    assert editada.json()["usuario_id"] == gestor.id
+
+    async with AsyncSessionLocal() as db:
+        alerta = await db.get(Alerta, creada["id"])
+    assert alerta is not None
+    assert alerta.usuario_id == gestor.id
+    # La edición queda firmada por quien la hizo.
+    assert alerta.updated_by == gestor.id
+
+    del_otro = await client_gestor.get("/alertas", headers=otro.headers)
+    assert del_otro.json()["total"] == 0
