@@ -141,6 +141,7 @@ Verificado con `alembic upgrade head` → `alembic downgrade base` → `alembic 
 | Usuarios | `GET /usuarios`, `POST /usuarios`, `GET/PATCH/DELETE /usuarios/{id}` |
 | Favoritos | `GET /favoritos`, `POST /favoritos`, `GET/PATCH/DELETE /favoritos/{codigo_bdns}` |
 | Alertas | `GET /alertas`, `POST /alertas`, `GET/PATCH/DELETE /alertas/{id}` |
+| Historial de alertas | `GET /alertas/{id}/ejecuciones`, `GET /alertas/{id}/ejecuciones/{ejecucion_id}` |
 
 Convenciones comunes a los listados y las escrituras:
 
@@ -233,6 +234,24 @@ se conserva**: la comparten alertas y análisis IA.
 - **`GET /alertas/{id}`** devuelve la alerta con sus filtros, con el mismo
   schema que el listado (`AlertaRead`). Los filtros son ids: los nombres los
   pone el frontend con la BDNS.
+
+#### Historial de ejecuciones
+
+Cada vez que el motor de alertas evalúa una alerta deja una fila en
+`alerta_ejecucion`, con las convocatorias detectadas en
+`alerta_ejecucion_convocatoria`. Estos dos endpoints son **solo de lectura**:
+
+- **`GET /alertas/{id}/ejecuciones`**: historial paginado de esa alerta, la
+  ejecución más reciente primero (por `fecha_ejecucion_at`). Cada elemento es
+  un resumen: fecha, cuántas convocatorias se encontraron, `estado_envio`
+  (`enviado`, `sin_novedades` o `error`) y `detalle_error` si falló. Filtro
+  opcional `estado_envio`, para quedarse solo con los fallos.
+- **`GET /alertas/{id}/ejecuciones/{ejecucion_id}`**: el resumen más las
+  **convocatorias detectadas**, con la ficha que se guardó en la caché local.
+  Una ejecución de otra alerta, aunque sea tuya, responde 404.
+
+El historial estará vacío hasta que exista el motor de alertas: hoy nada
+escribe en esas tablas.
 - **Órganos y regiones se filtran por id del catálogo de la BDNS**, no por
   texto: el frontend ya tiene esos ids porque consulta la BDNS. Se guardan
   normalizados (una fila por id en `alerta_organo`/`alerta_region`, sin
@@ -316,3 +335,4 @@ El desarrollo se organiza como Hito → Funcionalidad → Tarea en `api-hitos-fu
 - Hito 3, Funcionalidad 1 — Endpoints de favoritos: **hecho** (marcar/quitar, listado con join a convocatoria, nota personal, 85 tests contra Postgres real).
 - Hito 4, Funcionalidad 1 — CRUD de alertas: **hecho** (crear/editar/eliminar, filtros de órgano y región normalizados por id BDNS).
 - Hito 4 — Listado y detalle de alertas: **hecho** (paginado, filtros por órgano/región/activa, sin N+1, 142 tests contra Postgres real).
+- Hito 4 — Historial de ejecuciones por alerta: **hecho** (solo lectura; 159 tests contra Postgres real). El motor que escribe las ejecuciones sigue pendiente.
