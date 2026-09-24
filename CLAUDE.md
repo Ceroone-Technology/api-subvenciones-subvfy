@@ -42,7 +42,7 @@ El desarrollo completo está desglosado en `D:\Trabajo\BigToOne\Subvenciones\api
 - **Hito 4, Funcionalidad 1 — CRUD de alertas (10 h)**: hecho (mutaciones). Router en `app/api/routes/alertas.py`, lógica en `app/services/alertas.py`, normalización de filtros en `app/services/filtros.py`, índices en `e4a19c7d2b58`. 119 tests verdes (34 nuevos), ruff y mypy limpios.
 - **Hito 4 — Listado y detalle de alertas**: hecho. `GET /alertas` (paginado con `PaginacionDep`/`Pagina[T]`, filtros `organo_id`/`region_id`/`activa`) y `GET /alertas/{id}` en el mismo router y servicio; los 404 están declarados en el OpenAPI del detalle, el PATCH y el DELETE. 142 tests verdes (23 nuevos en `tests/test_alertas_listado.py`), ruff y mypy limpios.
 - **Hito 4 — Historial de ejecuciones por alerta**: hecho, **solo lectura**. `GET /alertas/{id}/ejecuciones` (paginado, filtro `estado_envio`) y `GET /alertas/{id}/ejecuciones/{ejecucion_id}` (con las convocatorias detectadas), en el router de alertas y en `app/services/alerta_ejecuciones.py`. Sin modelo nuevo ni migración: `AlertaEjecucion` y `AlertaEjecucionConvocatoria` ya estaban en `827c98b6a656`. 159 tests verdes (17 nuevos), ruff y mypy limpios.
-- **Motor de alertas — pendiente**: nadie escribe todavía en `alerta_ejecucion`, así que el historial nace vacío. `apscheduler` está en `requirements.txt` pero sin usar: no hay ningún módulo de scheduler ni de ejecución. Cuando se haga, la API de consulta ya existe.
+- **Hito 4 — Motor de ejecución de alertas, tarea 1 de 3 (job programado)**: hecho. Servicio en `app/services/motor_alertas.py` (selección por frecuencia + ciclo con aislamiento de fallos), disparador en `app/core/scheduler.py` (APScheduler 3.x, `AsyncIOScheduler`) enganchado al `lifespan` de `app/main.py`, e identidad de los procesos automáticos en `app/services/sistema.py`. 185 tests verdes (15 nuevos), ruff y mypy limpios. **Tareas 2 y 3 pendientes**: consultar la BDNS y registrar la ejecución en `alerta_ejecucion` con sus convocatorias. Hasta entonces `evaluar_alerta` no hace nada y el historial sigue naciendo vacío.
 - **Hito 4 — Cobertura de integración del CRUD de alertas**: hecho, solo tests (`tests/test_alertas.py`, 11 nuevos; 170 verdes con el historial ya integrado). Cierran cuatro huecos sobre reglas ya documentadas: el DELETE arrastra `alerta_ejecucion` y su tabla intermedia pero conserva la convocatoria cacheada; los límites de campo (`nombre`, `texto_busqueda`, `nivel_administracion`, `canal_notificacion`, `MAX_FILTROS`) validados entrando por HTTP; el rol `usuario` gestiona sus propias alertas (los endpoints no exigen gestor) y no alcanza las de un compañero; y `usuario_id`/`id` en el body no reasignan el propietario ni al crear ni al editar.
 - Hito 4 (Alertas, 22 h), Hito 5 (Análisis con IA), Hito 6 (Ficha ampliada, sin cambios de backend), Hito 7 (Cierre): pendientes, ver el .docx para el desglose de tareas y horas de cada uno.
 
@@ -164,3 +164,28 @@ Decisiones cerradas con el usuario:
 **Gotcha de tests**: el teardown de `tests/conftest.py` tiene que poner a NULL `created_by`/`updated_by` de las convocatorias de prueba **antes** de borrar los usuarios, porque esas columnas apuntan a `usuario.id`. Si añades una tabla nueva que los procesos firmen, va en ese mismo bloque y en ese mismo orden.
 
 **Gotcha de tests (alertas)**: las alertas de prueba se borran **explícitamente antes** que los usuarios, no por la cascada. `alerta_organo`/`alerta_region` quedan a dos niveles (usuario → alerta → hija), y Postgres comprueba su FK de auditoría `created_by → usuario` antes de que la cascada llegue a borrarlas. Sin ese paso, el primer teardown falla y deja restos que tumban la limpieza de todos los tests siguientes (fueron 111 errores). Aplica a cualquier tabla nueva firmada que quede a más de un nivel de cascada del usuario. En producción no pasa, porque los usuarios solo se dan de baja lógica.
+
+## Motor de ejecución de alertas (desde Hito 4, tarea 1 de 3)
+
+Decisiones cerradas con el usuario:
+
+- **Quién toca se decide con `alerta.ultima_ejecucion_at`**, contra el intervalo de su frecuencia, en **una sola consulta** (`alertas_pendientes`). No se deriva de `alerta_ejecucion` (sería un MAX por alerta) ni se añadió columna de próxima ejecución. Orden de servicio: las nunca ejecutadas primero y luego las más atrasadas.
+- **`frecuencia = "inmediata"` es intervalo cero**: toca en cada ciclo, así que su cadencia real es el intervalo del scheduler (`SCHEDULER_INTERVALO_MINUTOS`, 15 por defecto).
+- **Esta tarea solo marca `ultima_ejecucion_at`** (firmando `updated_by` con el usuario de sistema). Las filas de `alerta_ejecucion` son de la tarea 3: escribirlas aquí sería adelantarla. Sin esa marca, cada ciclo reprocesaría lo mismo.
+- **`evaluar_alerta` es el punto de extensión** y hoy no hace nada. No lanza `NotImplementedError` a propósito: dejaría todas las alertas en error y el motor las reintentaría sin fin.
+- **Aislamiento de fallos**: una alerta que revienta se registra con `logger.exception` (solo el `alerta_id`, nada del usuario), se hace `rollback` y se sigue. Su `ultima_ejecucion_at` no avanza, así que el ciclo siguiente la reintenta. Hay un tope de `MAX_POR_CICLO` alertas por ciclo.
+- **El servicio no sabe de APScheduler ni de FastAPI**: recibe la sesión de fuera, así que vale igual para un test, una CLI o la Lambda del Hito 7. `app/core/scheduler.py` es solo fontanería y no se despliega en producción.
+- **Desactivado por defecto** (`SCHEDULER_HABILITADO=false`): en tests y en Lambda nada debe arrancar por su cuenta. Además, `httpx`+`ASGITransport` no dispara el `lifespan`, así que la suite no lo levanta ni por accidente.
+- **Multi-worker, asumido y documentado**: con varios workers de uvicorn cada proceso arrancaría su scheduler y las alertas se evaluarían por duplicado. Hoy se corre con un worker y en Lambda + EventBridge el disparo es externo, así que se deja para el Hito 7. Si hiciera falta antes, la solución barata es envolver el ciclo en un `pg_try_advisory_lock`.
+
+**Gotcha de SQLAlchemy async (dos, y los dos costaron un test rojo)**:
+
+- El `UPDATE` que marca la ejecución lleva `execution_options(synchronize_session=False)`. Por defecto expira los atributos de las alertas ya cargadas, y leer la siguiente del bucle dispara una recarga perezosa: `MissingGreenlet`.
+- `alertas_pendientes` hace `db.expunge(alerta)` de cada fila. Si siguieran atadas a la sesión, el `rollback` que aísla el fallo de una alerta expiraría las demás, con el mismo `MissingGreenlet`. Se desprenden con todas sus columnas cargadas, así que leerlas después es seguro.
+
+**Gotcha de APScheduler 3.x**: su `shutdown` va decorado con `run_in_event_loop`, así que **no apaga en el momento**, sino en la siguiente vuelta del loop. Por eso `parar_scheduler` es `async` y cede el control (`await asyncio.sleep(0)`) antes de devolver; si no, el apagado se queda a medias y `scheduler.running` sigue en `True`.
+
+**Gotcha de logs**: uvicorn solo configura sus propios loggers, así que sin `logging.basicConfig` los `INFO` de `app.*` no aparecen en `docker compose logs -f api`. Se configura una vez en el `lifespan`, con `LOG_LEVEL`.
+
+**Identidad de los procesos automáticos**: `app/services/sistema.py` resuelve el id de `sistema@subvfy.es` (seed de `b7f3c21a9d40`) y lo cachea por proceso. Sigue siendo una identidad de auditoría, no una cuenta de acceso.
+

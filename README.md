@@ -275,6 +275,41 @@ POST /alertas
 }
 ```
 
+### Motor de alertas (job programado)
+
+Quien evalúa las alertas es un job periódico. En local lo dispara **APScheduler**
+dentro del proceso de la API; en producción (Hito 7) será EventBridge Scheduler
+invocando una Lambda, con el mismo servicio de dominio
+(`app/services/motor_alertas.py`).
+
+Cada ciclo selecciona las alertas **activas** a las que toca evaluarse —según su
+`frecuencia` y su `ultima_ejecucion_at`— y las recorre una a una. Si una falla,
+se registra en el log y se sigue con las demás; como su `ultima_ejecucion_at` no
+avanza, el ciclo siguiente la reintenta. `frecuencia: "inmediata"` significa
+"en cada ciclo", así que su cadencia real es el intervalo configurado.
+
+**Todavía no consulta la BDNS ni escribe el historial**: eso son las tareas 2 y 3.
+Hoy el ciclo solo marca la alerta como evaluada, firmando con el usuario de sistema.
+
+Se configura con dos variables (ver `.env.example`):
+
+```bash
+SCHEDULER_HABILITADO=false      # desactivado por defecto: en tests no debe arrancar
+SCHEDULER_INTERVALO_MINUTOS=15
+LOG_LEVEL=INFO                  # sin esto no se ven los INFO de la app
+```
+
+Para verlo trabajar: pon `SCHEDULER_HABILITADO=true` y un intervalo corto en tu
+`.env`, reinicia con `docker compose restart api` y mira
+`docker compose logs -f api`. El primer ciclo sale al arrancar, sin esperar el
+intervalo.
+
+**Aviso de multi-worker**: con varios workers de uvicorn, cada proceso arranca su
+propio scheduler y las alertas se evaluarían por duplicado. Hoy se corre con un
+worker, y en Lambda + EventBridge el disparo es externo, así que el problema
+desaparece; si hiciera falta antes, se envolvería el ciclo en un
+`pg_try_advisory_lock`.
+
 ### Primer administrador
 
 Crear un usuario exige estar autenticado, y autenticarse exige que ya exista
@@ -317,7 +352,7 @@ app/
   models/          # modelos SQLAlchemy (uno por tabla de schema-subvfy.sql)
   schemas/         # schemas Pydantic de request/response
   api/routes/      # un router por recurso (rol, empresa, usuario, auth, ...)
-  services/        # lógica de negocio sin HTTP (desde alertas)
+  services/        # lógica de negocio sin HTTP (alertas, motor de alertas, identidad de sistema)
   core/            # seguridad (JWT/hash), permisos por rol, scheduler
   cli.py           # utilidades de consola (crear el primer admin)
 alembic/           # migraciones
@@ -333,6 +368,7 @@ El desarrollo se organiza como Hito → Funcionalidad → Tarea en `api-hitos-fu
 - Hito 2, Funcionalidad 3 — API de empresa/rol/usuario: **hecho** (schemas Pydantic + CRUD paginado + hashing de contraseñas).
 - Hito 2, Funcionalidad 4 — Autenticación real (JWT): **hecho** (login/refresh/logout/me, autorización por rol, aislamiento multi-tenant, 70 tests contra Postgres real).
 - Hito 3, Funcionalidad 1 — Endpoints de favoritos: **hecho** (marcar/quitar, listado con join a convocatoria, nota personal, 85 tests contra Postgres real).
+- Hito 4 — Motor de ejecución de alertas (tarea 1 de 3, job programado): **hecho** (selección por frecuencia, ciclo con aislamiento de fallos, APScheduler en el lifespan; 185 tests contra Postgres real). Pendientes la consulta a la BDNS y el registro del historial.
 - Hito 4, Funcionalidad 1 — CRUD de alertas: **hecho** (crear/editar/eliminar, filtros de órgano y región normalizados por id BDNS).
 - Hito 4 — Listado y detalle de alertas: **hecho** (paginado, filtros por órgano/región/activa, sin N+1, 142 tests contra Postgres real).
 - Hito 4 — Historial de ejecuciones por alerta: **hecho** (solo lectura; 159 tests contra Postgres real). El motor que escribe las ejecuciones sigue pendiente.
