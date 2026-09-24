@@ -31,6 +31,16 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-5"
 
+    # Nivel de log de la aplicación. Sin esto, los INFO de app.* no se ven:
+    # uvicorn solo configura sus propios loggers.
+    log_level: str = "INFO"
+
+    # Motor de alertas (APScheduler en local; en Lambda lo dispara EventBridge)
+    # Desactivado por defecto: en tests y en la Lambda del Hito 7 nada debe
+    # arrancar por su cuenta. Se activa en el .env de desarrollo.
+    scheduler_habilitado: bool = False
+    scheduler_intervalo_minutos: int = 15
+
     # CORS — orígenes permitidos, separados por coma
     cors_origins: str = "http://localhost:4200"
 
