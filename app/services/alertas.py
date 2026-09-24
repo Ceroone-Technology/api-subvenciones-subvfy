@@ -1,7 +1,7 @@
-"""Mutaciones de alerta (Hito 4, Funcionalidad 1).
+"""Alertas: listado, detalle y mutaciones (Hito 4).
 
 **Las alertas son personales**, como los favoritos: cuelgan de
-`alerta.usuario_id` y solo su propietario las edita o borra. Cualquier otro,
+`alerta.usuario_id` y solo su propietario las ve, edita o borra. Cualquier otro,
 admin incluido, recibe lo mismo que con un id inexistente
 (`AlertaNoEncontrada` → 404): no se confirma que exista una alerta ajena.
 
@@ -13,13 +13,17 @@ El servicio no conoce HTTP: señala los errores con excepciones de dominio y
 el router las traduce.
 """
 
+from collections import defaultdict
+from collections.abc import Sequence
 from datetime import date
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import ColumnElement, delete, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Alerta, AlertaOrgano, AlertaRegion
 from app.schemas.alerta import AlertaCreate, AlertaRead, AlertaUpdate
+
+_CAMPOS_FILTRO = ("organos", "regiones")
 
 
 class AlertaNoEncontrada(Exception):
@@ -28,6 +32,59 @@ class AlertaNoEncontrada(Exception):
 
 class RangoFechasInvalido(ValueError):
     """`fecha_desde` > `fecha_hasta` una vez fusionado el PATCH con lo guardado."""
+
+
+async def listar_alertas(
+    db: AsyncSession,
+    usuario_id: int,
+    *,
+    offset: int,
+    limit: int,
+    organo_id: int | None = None,
+    region_id: int | None = None,
+    activa: bool | None = None,
+) -> tuple[list[AlertaRead], int]:
+    """Página de alertas del usuario, más recientes primero, y el total que
+    cumple los filtros.
+
+    El filtro por propietario no es un parámetro del cliente: se fuerza
+    siempre. Con `organo_id`/`region_id` se buscan las alertas que *incluyen*
+    ese id entre sus filtros.
+    """
+    filtros: list[ColumnElement[bool]] = [Alerta.usuario_id == usuario_id]
+    if organo_id is not None:
+        filtros.append(
+            exists().where(AlertaOrgano.alerta_id == Alerta.id, AlertaOrgano.organo_bdns_id == organo_id)
+        )
+    if region_id is not None:
+        filtros.append(
+            exists().where(AlertaRegion.alerta_id == Alerta.id, AlertaRegion.region_bdns_id == region_id)
+        )
+    if activa is not None:
+        filtros.append(Alerta.activa.is_(activa))
+
+    total = await db.scalar(select(func.count()).select_from(Alerta).where(*filtros))
+    alertas = (
+        await db.scalars(
+            select(Alerta)
+            .where(*filtros)
+            # El id desempata alertas creadas en la misma transacción, que
+            # comparten created_at: sin él, la paginación podría repetir filas.
+            .order_by(Alerta.created_at.desc(), Alerta.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+    ).all()
+    return await _con_filtros(db, alertas), total or 0
+
+
+async def obtener_alerta(db: AsyncSession, alerta_id: int, usuario_id: int) -> AlertaRead:
+    alerta = (
+        await db.execute(select(Alerta).where(Alerta.id == alerta_id, Alerta.usuario_id == usuario_id))
+    ).scalar_one_or_none()
+    if alerta is None:
+        raise AlertaNoEncontrada
+    return (await _con_filtros(db, [alerta]))[0]
 
 
 async def crear_alerta(db: AsyncSession, datos: AlertaCreate, usuario_id: int) -> AlertaRead:
@@ -124,15 +181,42 @@ async def _leer(db: AsyncSession, alerta_id: int) -> AlertaRead:
             select(Alerta).where(Alerta.id == alerta_id).execution_options(populate_existing=True)
         )
     ).scalar_one()
-    # Ordenados por id de fila: se devuelven en el orden en que se enviaron.
-    organos = await db.scalars(
-        select(AlertaOrgano.organo_bdns_id).where(AlertaOrgano.alerta_id == alerta_id).order_by(AlertaOrgano.id)
-    )
-    regiones = await db.scalars(
-        select(AlertaRegion.region_bdns_id).where(AlertaRegion.alerta_id == alerta_id).order_by(AlertaRegion.id)
-    )
+    return (await _con_filtros(db, [alerta]))[0]
 
-    columnas = {
-        campo: getattr(alerta, campo) for campo in AlertaRead.model_fields if campo not in ("organos", "regiones")
-    }
-    return AlertaRead(**columnas, organos=list(organos), regiones=list(regiones))
+
+async def _con_filtros(db: AsyncSession, alertas: Sequence[Alerta]) -> list[AlertaRead]:
+    """Resuelve los filtros de varias alertas con dos consultas en total.
+
+    Es la única forma de montar un `AlertaRead`, tanto para una alerta como
+    para una página entera: consultar las tablas hijas alerta por alerta
+    sería el N+1 clásico del listado. El modelo no tiene `relationship()`
+    a propósito; así no hay lazy-loads que en async revientan.
+    """
+    ids = [alerta.id for alerta in alertas]
+    organos: dict[int, list[int]] = defaultdict(list)
+    regiones: dict[int, list[int]] = defaultdict(list)
+    if ids:
+        # Ordenados por id de fila: se devuelven en el orden en que se enviaron.
+        filas_organo = await db.execute(
+            select(AlertaOrgano.alerta_id, AlertaOrgano.organo_bdns_id)
+            .where(AlertaOrgano.alerta_id.in_(ids))
+            .order_by(AlertaOrgano.id)
+        )
+        for alerta_id, id_bdns in filas_organo:
+            organos[alerta_id].append(id_bdns)
+        filas_region = await db.execute(
+            select(AlertaRegion.alerta_id, AlertaRegion.region_bdns_id)
+            .where(AlertaRegion.alerta_id.in_(ids))
+            .order_by(AlertaRegion.id)
+        )
+        for alerta_id, id_bdns in filas_region:
+            regiones[alerta_id].append(id_bdns)
+
+    return [
+        AlertaRead(
+            **{campo: getattr(alerta, campo) for campo in AlertaRead.model_fields if campo not in _CAMPOS_FILTRO},
+            organos=organos[alerta.id],
+            regiones=regiones[alerta.id],
+        )
+        for alerta in alertas
+    ]
