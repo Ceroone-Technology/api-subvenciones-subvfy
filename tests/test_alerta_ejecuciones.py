@@ -55,7 +55,11 @@ async def _crear_ejecucion(
             await db.flush()
             db.add(
                 AlertaEjecucionConvocatoria(
-                    alerta_ejecucion_id=ejecucion.id, convocatoria_id=convocatoria.id
+                    alerta_ejecucion_id=ejecucion.id,
+                    # Desnormalizado, con su UNIQUE(alerta_id, convocatoria_id):
+                    # es lo que impide notificar dos veces lo mismo.
+                    alerta_id=alerta_id,
+                    convocatoria_id=convocatoria.id,
                 )
             )
             codigos.append(codigo)
