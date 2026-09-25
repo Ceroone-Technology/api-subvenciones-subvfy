@@ -288,8 +288,15 @@ se registra en el log y se sigue con las demás; como su `ultima_ejecucion_at` n
 avanza, el ciclo siguiente la reintenta. `frecuencia: "inmediata"` significa
 "en cada ciclo", así que su cadencia real es el intervalo configurado.
 
-**Todavía no consulta la BDNS ni escribe el historial**: eso son las tareas 2 y 3.
-Hoy el ciclo solo marca la alerta como evaluada, firmando con el usuario de sistema.
+Ya **consulta la BDNS** con los criterios de cada alerta (texto, nivel de
+administración, órganos, regiones y fechas). Lo que **todavía no hace** es
+escribir el historial ni deduplicar lo ya avisado: eso es la tarea 3. Hoy los
+resultados se cuentan en el log y el ciclo marca la alerta como evaluada.
+
+Detalles de la consulta: los ids de órgano y región se envían repetidos en una
+sola petición (la BDNS los acumula), `solo_mrr` se filtra en cliente porque la
+API no tiene ese parámetro, y una alerta **sin ningún criterio** se rechaza en
+lugar de traer la base entera.
 
 Se configura con dos variables (ver `.env.example`):
 
@@ -297,7 +304,17 @@ Se configura con dos variables (ver `.env.example`):
 SCHEDULER_HABILITADO=false      # desactivado por defecto: en tests no debe arrancar
 SCHEDULER_INTERVALO_MINUTOS=15
 LOG_LEVEL=INFO                  # sin esto no se ven los INFO de la app
+
+BDNS_BASE_URL=https://www.infosubvenciones.es/bdnstrans/api
+BDNS_TIMEOUT_SEGUNDOS=10
+BDNS_TAMANO_PAGINA=100          # hasta 2.000 convocatorias por alerta y ciclo
+BDNS_MAX_PAGINAS=20
+BDNS_DIAS_PRIMERA_EJECUCION=7   # ventana la primera vez que se evalúa una alerta
 ```
+
+La BDNS es una API pública: no hace falta credencial. Si trabajas en Windows con
+Avast, añade `infosubvenciones.es` a las excepciones del Escudo web; si no, el
+contenedor no valida su certificado y toda consulta falla.
 
 Para verlo trabajar: pon `SCHEDULER_HABILITADO=true` y un intervalo corto en tu
 `.env`, reinicia con `docker compose restart api` y mira
@@ -368,6 +385,7 @@ El desarrollo se organiza como Hito → Funcionalidad → Tarea en `api-hitos-fu
 - Hito 2, Funcionalidad 3 — API de empresa/rol/usuario: **hecho** (schemas Pydantic + CRUD paginado + hashing de contraseñas).
 - Hito 2, Funcionalidad 4 — Autenticación real (JWT): **hecho** (login/refresh/logout/me, autorización por rol, aislamiento multi-tenant, 70 tests contra Postgres real).
 - Hito 3, Funcionalidad 1 — Endpoints de favoritos: **hecho** (marcar/quitar, listado con join a convocatoria, nota personal, 85 tests contra Postgres real).
+- Hito 4 — Motor de ejecución de alertas (tarea 2 de 3, consulta a la BDNS): **hecho** (constructor puro de la consulta + cliente HTTP con topes y timeouts; 219 tests contra Postgres real, el cliente con MockTransport). Pendiente el registro del historial.
 - Hito 4 — Motor de ejecución de alertas (tarea 1 de 3, job programado): **hecho** (selección por frecuencia, ciclo con aislamiento de fallos, APScheduler en el lifespan; 185 tests contra Postgres real). Pendientes la consulta a la BDNS y el registro del historial.
 - Hito 4, Funcionalidad 1 — CRUD de alertas: **hecho** (crear/editar/eliminar, filtros de órgano y región normalizados por id BDNS).
 - Hito 4 — Listado y detalle de alertas: **hecho** (paginado, filtros por órgano/región/activa, sin N+1, 142 tests contra Postgres real).

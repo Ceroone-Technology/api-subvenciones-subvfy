@@ -42,7 +42,8 @@ El desarrollo completo está desglosado en `D:\Trabajo\BigToOne\Subvenciones\api
 - **Hito 4, Funcionalidad 1 — CRUD de alertas (10 h)**: hecho (mutaciones). Router en `app/api/routes/alertas.py`, lógica en `app/services/alertas.py`, normalización de filtros en `app/services/filtros.py`, índices en `e4a19c7d2b58`. 119 tests verdes (34 nuevos), ruff y mypy limpios.
 - **Hito 4 — Listado y detalle de alertas**: hecho. `GET /alertas` (paginado con `PaginacionDep`/`Pagina[T]`, filtros `organo_id`/`region_id`/`activa`) y `GET /alertas/{id}` en el mismo router y servicio; los 404 están declarados en el OpenAPI del detalle, el PATCH y el DELETE. 142 tests verdes (23 nuevos en `tests/test_alertas_listado.py`), ruff y mypy limpios.
 - **Hito 4 — Historial de ejecuciones por alerta**: hecho, **solo lectura**. `GET /alertas/{id}/ejecuciones` (paginado, filtro `estado_envio`) y `GET /alertas/{id}/ejecuciones/{ejecucion_id}` (con las convocatorias detectadas), en el router de alertas y en `app/services/alerta_ejecuciones.py`. Sin modelo nuevo ni migración: `AlertaEjecucion` y `AlertaEjecucionConvocatoria` ya estaban en `827c98b6a656`. 159 tests verdes (17 nuevos), ruff y mypy limpios.
-- **Hito 4 — Motor de ejecución de alertas, tarea 1 de 3 (job programado)**: hecho. Servicio en `app/services/motor_alertas.py` (selección por frecuencia + ciclo con aislamiento de fallos), disparador en `app/core/scheduler.py` (APScheduler 3.x, `AsyncIOScheduler`) enganchado al `lifespan` de `app/main.py`, e identidad de los procesos automáticos en `app/services/sistema.py`. 185 tests verdes (15 nuevos), ruff y mypy limpios. **Tareas 2 y 3 pendientes**: consultar la BDNS y registrar la ejecución en `alerta_ejecucion` con sus convocatorias. Hasta entonces `evaluar_alerta` no hace nada y el historial sigue naciendo vacío.
+- **Hito 4 — Motor de ejecución de alertas, tarea 1 de 3 (job programado)**: hecho. Servicio en `app/services/motor_alertas.py` (selección por frecuencia + ciclo con aislamiento de fallos), disparador en `app/core/scheduler.py` (APScheduler 3.x, `AsyncIOScheduler`) enganchado al `lifespan` de `app/main.py`, e identidad de los procesos automáticos en `app/services/sistema.py`. 185 tests verdes (15 nuevos), ruff y mypy limpios. **Tarea 3 pendiente**: registrar la ejecución en `alerta_ejecucion` con sus convocatorias y deduplicar lo ya notificado; hasta entonces el historial sigue naciendo vacío.
+- **Hito 4 — Motor de ejecución de alertas, tarea 2 de 3 (consulta a la BDNS)**: hecho. Constructor puro en `app/services/bdns_consulta.py` y cliente HTTP en `app/services/bdns_cliente.py`, enganchados en `evaluar_alerta`. 219 tests verdes (34 nuevos), ruff y mypy limpios.
 - **Hito 4 — Cobertura de integración del CRUD de alertas**: hecho, solo tests (`tests/test_alertas.py`, 11 nuevos; 170 verdes con el historial ya integrado). Cierran cuatro huecos sobre reglas ya documentadas: el DELETE arrastra `alerta_ejecucion` y su tabla intermedia pero conserva la convocatoria cacheada; los límites de campo (`nombre`, `texto_busqueda`, `nivel_administracion`, `canal_notificacion`, `MAX_FILTROS`) validados entrando por HTTP; el rol `usuario` gestiona sus propias alertas (los endpoints no exigen gestor) y no alcanza las de un compañero; y `usuario_id`/`id` en el body no reasignan el propietario ni al crear ni al editar.
 - Hito 4 (Alertas, 22 h), Hito 5 (Análisis con IA), Hito 6 (Ficha ampliada, sin cambios de backend), Hito 7 (Cierre): pendientes, ver el .docx para el desglose de tareas y horas de cada uno.
 
@@ -188,4 +189,26 @@ Decisiones cerradas con el usuario:
 **Gotcha de logs**: uvicorn solo configura sus propios loggers, así que sin `logging.basicConfig` los `INFO` de `app.*` no aparecen en `docker compose logs -f api`. Se configura una vez en el `lifespan`, con `LOG_LEVEL`.
 
 **Identidad de los procesos automáticos**: `app/services/sistema.py` resuelve el id de `sistema@subvfy.es` (seed de `b7f3c21a9d40`) y lo cachea por proceso. Sigue siendo una identidad de auditoría, no una cuenta de acceso.
+
+### La consulta a la BDNS (tarea 2 de 3)
+
+**Parámetros verificados contra la API real** (`GET {BDNS_BASE_URL}/convocatorias/busqueda`), no sacados de memoria. Si algún día cambian, se comprueban otra vez antes de tocar el código:
+
+| Nuestro criterio | Parámetro BDNS |
+|---|---|
+| `texto_busqueda` | `descripcion` |
+| `nivel_administracion` | `tipoAdministracion`: `estado`→`C`, `ccaa`→`A`, `local`→`L`, `otros`→`O` |
+| `organos` / `regiones` | `organos` / `regiones`, ids enteros **repetibles**: la API los acumula |
+| `fecha_desde` / `fecha_hasta` | `fechaDesde` / `fechaHasta` en **`dd/mm/yyyy`** (la respuesta viene en `yyyy-mm-dd`) |
+| `solo_mrr` | **no tiene parámetro**: se filtra en cliente con el campo `mrr` de cada fila |
+
+- **Una sola consulta por alerta**: al acumular varios `organos`/`regiones`, no hay producto cartesiano ni filtrado en cliente por esos criterios. Si algún día la BDNS deja de acumularlos, habrá que volver a plantearlo.
+- **El mapeo vive en un único sitio**, `NIVEL_A_TIPO_ADMINISTRACION` en `app/services/bdns_consulta.py`. No repartas equivalencias por el código.
+- **`construir_consulta` es pura**: recibe la alerta, sus filtros y la fecha `desde`, y no toca BD ni red. Por eso sus tests no necesitan Postgres.
+- **La fecha `desde` llega como parámetro**, no se calcula en el constructor. Hoy la pone `evaluar_alerta`: `ultima_ejecucion_at`, o una ventana de `BDNS_DIAS_PRIMERA_EJECUCION` días la primera vez. Si el usuario puso su propia `fecha_desde`, **gana la más restrictiva**: lo incremental no reabre un rango que él había cerrado.
+- **Criterios que no dan consulta** → `CriteriosAlertaInvalidos`: una alerta sin ningún criterio (traería la BDNS entera) o con un rango ya pasado. `solo_mrr` no cuenta como criterio. El ciclo lo registra y sigue con las demás.
+- **El cliente no reintenta** y no toca la base de datos. Los errores HTTP, de red y de timeout salen como `BdnsNoDisponible` (con `status` si lo hay). Recorre páginas hasta la última o hasta `BDNS_MAX_PAGINAS`, ordenando por `fechaRecepcion desc` para que, si se corta, se corte por lo más viejo.
+- **`httpx` es dependencia de runtime** desde esta tarea (antes solo de tests). Los tests del cliente usan `httpx.MockTransport`: mockear el servicio externo es legítimo, la base de datos sigue siendo real en el resto de la suite.
+
+**Gotcha de entorno (Avast, otra vez)**: Avast también intercepta `infosubvenciones.es`, así que desde el contenedor la consulta real falla con `CERTIFICATE_VERIFY_FAILED` y `BdnsNoDisponible`. Se arregla añadiendo `infosubvenciones.es` a las excepciones del Escudo web, igual que se hizo con `pypi.org`. **No se desactiva la verificación TLS** ni se mete un `verify=False` para salir del paso.
 
