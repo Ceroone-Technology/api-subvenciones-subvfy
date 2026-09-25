@@ -15,3 +15,5 @@ passlib[bcrypt]==1.7.4
 bcrypt==4.2.1
 anthropic==0.42.0
 apscheduler==3.10.4
+# Cliente HTTP async para consultar la BDNS (y el que ya usan los tests).
+httpx==0.28.1
