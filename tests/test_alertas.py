@@ -334,7 +334,9 @@ async def test_eliminar_alerta_se_lleva_su_historial(client_gestor: AsyncClient)
         await db.flush()
         db.add(
             AlertaEjecucionConvocatoria(
-                alerta_ejecucion_id=ejecuciones[0].id, convocatoria_id=convocatoria.id
+                alerta_ejecucion_id=ejecuciones[0].id,
+                alerta_id=creada["id"],
+                convocatoria_id=convocatoria.id,
             )
         )
         await db.commit()
