@@ -31,6 +31,17 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-5"
 
+    # BDNS (fuente de verdad de las convocatorias). Solo lectura, sin clave:
+    # la API es pública. Sin rate limit documentado, de ahí los topes.
+    bdns_base_url: str = "https://www.infosubvenciones.es/bdnstrans/api"
+    bdns_timeout_segundos: float = 10.0
+    bdns_tamano_pagina: int = 100
+    bdns_max_paginas: int = 20
+    # Ventana de la primera evaluación de una alerta, cuando todavía no tiene
+    # ultima_ejecucion_at: sin esto habría que decidir entre traer la BDNS
+    # entera o nada.
+    bdns_dias_primera_ejecucion: int = 7
+
     # Nivel de log de la aplicación. Sin esto, los INFO de app.* no se ven:
     # uvicorn solo configura sus propios loggers.
     log_level: str = "INFO"

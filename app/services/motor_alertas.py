@@ -1,10 +1,10 @@
-"""Motor de ejecución de alertas (Hito 4) — tarea 1 de 3: selección y ciclo.
+"""Motor de ejecución de alertas (Hito 4) — tareas 1 y 2: ciclo y consulta.
 
 Qué hace hoy: elegir las alertas **activas que toca evaluar** según su
-frecuencia y recorrerlas, dejando `ultima_ejecucion_at` marcada. Lo que
-todavía no hace, porque es de las tareas 2 y 3: consultar la BDNS y registrar
-los resultados en `alerta_ejecucion`. El hueco es `evaluar_alerta`, el punto
-de extensión.
+frecuencia, recorrerlas consultando la BDNS con sus criterios (tarea 2) y
+dejar `ultima_ejecucion_at` marcada. Lo que todavía no hace, porque es de la
+tarea 3: registrar los resultados en `alerta_ejecucion` y deduplicar lo ya
+notificado.
 
 **Sin APScheduler ni FastAPI dentro.** Recibe la sesión de fuera, así que
 sirve igual desde un test, una CLI o la Lambda del Hito 7; `app/core/scheduler.py`
@@ -23,12 +23,15 @@ la reintenta.
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Alerta
+from app.config import settings
+from app.models import Alerta, AlertaOrgano, AlertaRegion
+from app.services.bdns_cliente import ClienteBdns
+from app.services.bdns_consulta import construir_consulta
 
 logger = logging.getLogger(__name__)
 
@@ -59,14 +62,55 @@ class ResumenCiclo:
 
 
 async def evaluar_alerta(db: AsyncSession, alerta: Alerta) -> None:
-    """Punto de extensión: aquí irá la consulta a la BDNS (tarea 2) y el
-    registro de la ejecución con sus convocatorias (tarea 3).
+    """Consulta la BDNS con los criterios de la alerta (tarea 2).
 
-    De momento no hace nada más que dejar constancia en el log. No lanza
-    `NotImplementedError` a propósito: eso dejaría todas las alertas en error
-    y el motor las reintentaría sin fin en cada ciclo.
+    Lo que **todavía no hace** es registrar el resultado en `alerta_ejecucion`
+    ni deduplicar lo ya notificado: eso es la tarea 3. De momento los
+    resultados se cuentan en el log y se descartan.
+
+    Si los criterios no dan una consulta útil (`CriteriosAlertaInvalidos`) o la
+    BDNS no responde (`BdnsNoDisponible`), la excepción sube al ciclo, que la
+    registra y sigue con las demás alertas.
     """
-    logger.debug("Alerta %s seleccionada; evaluación pendiente de la tarea 2.", alerta.id)
+    organos, regiones = await filtros_de_alerta(db, alerta.id)
+    consulta = construir_consulta(alerta, organos, regiones, desde=_desde_de(alerta))
+
+    async with ClienteBdns() as cliente:
+        convocatorias = await cliente.buscar_todo(consulta)
+
+    logger.info(
+        "Alerta %s: %d convocatoria(s) encontradas en la BDNS (registro pendiente de la tarea 3).",
+        alerta.id,
+        len(convocatorias),
+    )
+
+
+async def filtros_de_alerta(db: AsyncSession, alerta_id: int) -> tuple[list[int], list[int]]:
+    """Los ids BDNS de órgano y región de una alerta, en dos consultas.
+
+    Se leen aquí y no en la selección del ciclo a propósito: la mayoría de los
+    ciclos no traen ninguna alerta, y cargar los filtros de todas por si acaso
+    sería trabajo tirado.
+    """
+    organos = await db.scalars(
+        select(AlertaOrgano.organo_bdns_id).where(AlertaOrgano.alerta_id == alerta_id)
+    )
+    regiones = await db.scalars(
+        select(AlertaRegion.region_bdns_id).where(AlertaRegion.alerta_id == alerta_id)
+    )
+    return list(organos), list(regiones)
+
+
+def _desde_de(alerta: Alerta) -> date:
+    """Desde cuándo se pregunta a la BDNS.
+
+    Lo normal es "desde la última vez que se evaluó". La primera vez no hay
+    referencia, así que se usa una ventana corta configurable en vez de
+    arrastrar el histórico entero.
+    """
+    if alerta.ultima_ejecucion_at is not None:
+        return alerta.ultima_ejecucion_at.date()
+    return (datetime.now(UTC) - timedelta(days=settings.bdns_dias_primera_ejecucion)).date()
 
 
 async def alertas_pendientes(
