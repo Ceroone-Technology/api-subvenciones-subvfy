@@ -146,6 +146,16 @@ async def _cachear_convocatorias(
     al lote con `COALESCE(excluded.campo, convocatoria.campo)`: si la BDNS
     devuelve un campo vacío, se conserva lo que hubiera (por ejemplo, la ficha
     completa que guardó un favorito).
+
+    De ahí que aquí **no haya respaldos en Python** (`x or y`) para los campos
+    que entran en ese COALESCE: sustituir un `None` antes del INSERT deja a
+    `excluded.campo` con valor, el COALESCE se vuelve inútil y el respaldo
+    machaca el dato cacheado. Si añades un campo, o va sin respaldo, o queda
+    fuera del COALESCE a sabiendas.
+
+    `financiada_mrr` sí se sobrescribe siempre: es el único campo fuera del
+    COALESCE, porque la BDNS manda `mrr` en todas las filas y para un booleano
+    vale lo último que diga la fuente.
     """
     filas = [
         {
@@ -153,7 +163,10 @@ async def _cachear_convocatorias(
             "titulo": convocatoria.titulo,
             "nivel_administracion": NIVEL_BDNS_A_NUESTRO.get((convocatoria.nivel1 or "").upper()),
             "administracion": convocatoria.nivel2,
-            "organo_convocante": convocatoria.nivel3 or convocatoria.nivel2,
+            # Sin respaldo a nivel2: si nivel3 viene vacío, lo que toca es
+            # dejar que el COALESCE conserve el órgano cacheado, que es más
+            # específico, en vez de sustituirlo por la administración.
+            "organo_convocante": convocatoria.nivel3,
             "fecha_registro": convocatoria.fecha_registro,
             "financiada_mrr": convocatoria.financiada_mrr,
             "created_by": usuario_sistema_id,
