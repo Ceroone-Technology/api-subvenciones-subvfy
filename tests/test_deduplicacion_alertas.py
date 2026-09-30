@@ -461,3 +461,32 @@ async def test_mrr_en_false_corrige_lo_cacheado(gestor: Sesion) -> None:
     await _procesar(alerta, [_resultado(codigo, mrr=False)])
 
     assert (await _cacheada(codigo)).financiada_mrr is False
+
+
+async def test_un_codigo_de_31_caracteres_no_llega_a_la_cache(gestor: Sesion) -> None:
+    """El código es la identidad (clave del ON CONFLICT), así que una ficha con
+    un código que no cabe se descarta en filtrar_nuevas en vez de recortarla:
+    truncarlo inventaría una convocatoria o pisaría otra. Y el descarte no puede
+    tumbar el ciclo: la ejecución de la alerta queda registrada igual."""
+    alerta = await _crear_alerta(gestor.id)
+    demasiado_largo = "X" * (_limite("codigo_bdns") + 1)
+    assert len(demasiado_largo) == 31
+
+    async with AsyncSessionLocal() as db:
+        nuevas = await filtrar_nuevas(db, alerta.id, [_resultado(demasiado_largo)])
+    assert nuevas == []
+
+    ejecucion = await _procesar(alerta, [_resultado(demasiado_largo)])
+
+    # La ejecución se registra: la alerta no se queda pendiente en bucle.
+    assert (ejecucion.convocatorias_encontradas, ejecucion.estado_envio) == (0, "sin_novedades")
+    async with AsyncSessionLocal() as db:
+        cuantas_ejecuciones = await db.scalar(
+            select(func.count()).select_from(AlertaEjecucion).where(AlertaEjecucion.alerta_id == alerta.id)
+        )
+        en_cache = await db.scalar(
+            select(func.count()).select_from(Convocatoria).where(Convocatoria.codigo_bdns == demasiado_largo)
+        )
+    assert cuantas_ejecuciones == 1
+    assert en_cache == 0  # no llega a la caché
+    assert await _notificadas(alerta.id) == []
