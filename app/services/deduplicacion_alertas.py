@@ -239,6 +239,10 @@ async def _cachear_convocatorias(
                 campo="órgano convocante",
             ),
             "fecha_registro": convocatoria.fecha_registro,
+            # Único campo fuera del COALESCE, y a propósito: la BDNS envía
+            # `mrr` en todas las filas, así que un False no es "dato ausente"
+            # sino una corrección real que debe pisar lo cacheado. No le pongas
+            # COALESCE ni hagas anulable el campo del dataclass.
             "financiada_mrr": convocatoria.financiada_mrr,
             "created_by": usuario_sistema_id,
             "updated_by": usuario_sistema_id,
