@@ -1,10 +1,10 @@
-"""Motor de ejecución de alertas (Hito 4) — tareas 1 y 2: ciclo y consulta.
+"""Motor de ejecución de alertas (Hito 4): ciclo, consulta a la BDNS y registro.
 
 Qué hace hoy: elegir las alertas **activas que toca evaluar** según su
 frecuencia, recorrerlas consultando la BDNS con sus criterios (tarea 2) y
 dejar `ultima_ejecucion_at` marcada. Lo que todavía no hace, porque es de la
-tarea 3: registrar los resultados en `alerta_ejecucion` y deduplicar lo ya
-notificado.
+tarea 3: mandar el aviso. Las novedades quedan registradas en
+`alerta_ejecucion` y su tabla puente, con `estado_envio = pendiente_envio`.
 
 **Sin APScheduler ni FastAPI dentro.** Recibe la sesión de fuera, así que
 sirve igual desde un test, una CLI o la Lambda del Hito 7; `app/core/scheduler.py`
@@ -32,6 +32,7 @@ from app.config import settings
 from app.models import Alerta, AlertaOrgano, AlertaRegion
 from app.services.bdns_cliente import ClienteBdns
 from app.services.bdns_consulta import construir_consulta
+from app.services.deduplicacion_alertas import filtrar_nuevas, registrar_ejecucion
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ INTERVALOS: dict[str, timedelta] = {
 # en el ciclo siguiente, porque su ultima_ejecucion_at no ha avanzado.
 MAX_POR_CICLO = 200
 
-Evaluador = Callable[[AsyncSession, Alerta], Awaitable[None]]
+Evaluador = Callable[[AsyncSession, Alerta, int], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -61,16 +62,14 @@ class ResumenCiclo:
     fallidas: int
 
 
-async def evaluar_alerta(db: AsyncSession, alerta: Alerta) -> None:
-    """Consulta la BDNS con los criterios de la alerta (tarea 2).
-
-    Lo que **todavía no hace** es registrar el resultado en `alerta_ejecucion`
-    ni deduplicar lo ya notificado: eso es la tarea 3. De momento los
-    resultados se cuentan en el log y se descartan.
+async def evaluar_alerta(db: AsyncSession, alerta: Alerta, usuario_sistema_id: int) -> None:
+    """Consulta la BDNS con los criterios de la alerta, se queda con lo que no
+    había notificado nunca y lo registra.
 
     Si los criterios no dan una consulta útil (`CriteriosAlertaInvalidos`) o la
     BDNS no responde (`BdnsNoDisponible`), la excepción sube al ciclo, que la
-    registra y sigue con las demás alertas.
+    registra y sigue con las demás alertas. Como el registro no se habrá
+    hecho, esos resultados volverán a salir como nuevos.
     """
     organos, regiones = await filtros_de_alerta(db, alerta.id)
     consulta = construir_consulta(alerta, organos, regiones, desde=_desde_de(alerta))
@@ -78,10 +77,16 @@ async def evaluar_alerta(db: AsyncSession, alerta: Alerta) -> None:
     async with ClienteBdns() as cliente:
         convocatorias = await cliente.buscar_todo(consulta)
 
+    nuevas = await filtrar_nuevas(db, alerta.id, convocatorias)
+    ejecucion = await registrar_ejecucion(db, alerta, nuevas, usuario_sistema_id=usuario_sistema_id)
+
     logger.info(
-        "Alerta %s: %d convocatoria(s) encontradas en la BDNS (registro pendiente de la tarea 3).",
+        "Alerta %s: %d de %d convocatoria(s) son novedad (ejecución %s, estado %s).",
         alerta.id,
+        ejecucion.convocatorias_encontradas,
         len(convocatorias),
+        ejecucion.id,
+        ejecucion.estado_envio,
     )
 
 
@@ -164,7 +169,7 @@ async def procesar_alertas_pendientes(
     fallidas = 0
     for alerta in pendientes:
         try:
-            await evaluar(db, alerta)
+            await evaluar(db, alerta, usuario_sistema_id)
         except Exception:
             # Aislamiento entre alertas: el fallo de una no puede tumbar el
             # ciclo. Se loguea con traza y con el id (nada de datos del

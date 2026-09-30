@@ -128,6 +128,7 @@ El esquema de `schema-subvfy.sql` ya está implementado en `app/models/` (14 tab
 - `0db12626fe94_seed_catalogo_de_roles.py` — siembra el catálogo de roles (`admin`, `gestor`, `usuario`).
 - `b7f3c21a9d40_seed_empresa_y_usuario_de_sistema.py` — siembra la identidad interna de auditoría para procesos automáticos.
 - `e4a19c7d2b58_indices_de_filtros_de_alerta.py` — índices por `organo_bdns_id`/`region_bdns_id` para la búsqueda inversa del motor de alertas.
+- `d8c5e0cf33c8_dedup_de_convocatorias_notificadas_por_.py` — `alerta_ejecucion_convocatoria.alerta_id` con `UNIQUE(alerta_id, convocatoria_id)` (la base de datos garantiza que una convocatoria no se notifica dos veces a la misma alerta) y el estado `pendiente_envio`.
 
 Verificado con `alembic upgrade head` → `alembic downgrade base` → `alembic upgrade head` sin errores, contra un PostgreSQL real.
 
@@ -244,14 +245,15 @@ Cada vez que el motor de alertas evalúa una alerta deja una fila en
 - **`GET /alertas/{id}/ejecuciones`**: historial paginado de esa alerta, la
   ejecución más reciente primero (por `fecha_ejecucion_at`). Cada elemento es
   un resumen: fecha, cuántas convocatorias se encontraron, `estado_envio`
-  (`enviado`, `sin_novedades` o `error`) y `detalle_error` si falló. Filtro
+  (`pendiente_envio`, `enviado`, `sin_novedades` o `error`) y `detalle_error` si falló. Filtro
   opcional `estado_envio`, para quedarse solo con los fallos.
 - **`GET /alertas/{id}/ejecuciones/{ejecucion_id}`**: el resumen más las
   **convocatorias detectadas**, con la ficha que se guardó en la caché local.
   Una ejecución de otra alerta, aunque sea tuya, responde 404.
 
-El historial estará vacío hasta que exista el motor de alertas: hoy nada
-escribe en esas tablas.
+Lo escribe el motor de alertas en cada ciclo: `pendiente_envio` cuando hay
+novedades y `sin_novedades` cuando no. `enviado` llegará con la funcionalidad de
+notificación por correo.
 - **Órganos y regiones se filtran por id del catálogo de la BDNS**, no por
   texto: el frontend ya tiene esos ids porque consulta la BDNS. Se guardan
   normalizados (una fila por id en `alerta_organo`/`alerta_region`, sin
@@ -288,10 +290,17 @@ se registra en el log y se sigue con las demás; como su `ultima_ejecucion_at` n
 avanza, el ciclo siguiente la reintenta. `frecuencia: "inmediata"` significa
 "en cada ciclo", así que su cadencia real es el intervalo configurado.
 
-Ya **consulta la BDNS** con los criterios de cada alerta (texto, nivel de
-administración, órganos, regiones y fechas). Lo que **todavía no hace** es
-escribir el historial ni deduplicar lo ya avisado: eso es la tarea 3. Hoy los
-resultados se cuentan en el log y el ciclo marca la alerta como evaluada.
+Cada ciclo **consulta la BDNS** con los criterios de la alerta (texto, nivel de
+administración, órganos, regiones y fechas), se queda **solo con lo que esa
+alerta no había visto nunca** y lo registra en su historial. Lo que **todavía no
+hace** es mandar el aviso: esas ejecuciones quedan en `pendiente_envio`.
+
+La deduplicación es **por alerta**, no por usuario: la misma convocatoria puede
+ser novedad para dos alertas distintas. Que no se repita lo garantiza la propia
+base de datos, con un `UNIQUE(alerta_id, convocatoria_id)`, así que ni dos
+ciclos a la vez cuentan dos veces la misma novedad. Si el registro falla a
+mitad, no queda nada marcado como visto y el ciclo siguiente lo vuelve a
+encontrar.
 
 Detalles de la consulta: los ids de órgano y región se envían repetidos en una
 sola petición (la BDNS los acumula), `solo_mrr` se filtra en cliente porque la
@@ -385,6 +394,7 @@ El desarrollo se organiza como Hito → Funcionalidad → Tarea en `api-hitos-fu
 - Hito 2, Funcionalidad 3 — API de empresa/rol/usuario: **hecho** (schemas Pydantic + CRUD paginado + hashing de contraseñas).
 - Hito 2, Funcionalidad 4 — Autenticación real (JWT): **hecho** (login/refresh/logout/me, autorización por rol, aislamiento multi-tenant, 70 tests contra Postgres real).
 - Hito 3, Funcionalidad 1 — Endpoints de favoritos: **hecho** (marcar/quitar, listado con join a convocatoria, nota personal, 85 tests contra Postgres real).
+- Hito 4 — Motor de ejecución de alertas (tarea 3 de 3, deduplicación y registro): **hecho** (dedup por alerta con garantía de base de datos, registro transaccional del historial y migración `d8c5e0cf33c8`; 229 tests contra Postgres real). Pendiente el envío del aviso.
 - Hito 4 — Motor de ejecución de alertas (tarea 2 de 3, consulta a la BDNS): **hecho** (constructor puro de la consulta + cliente HTTP con topes y timeouts; 219 tests contra Postgres real, el cliente con MockTransport). Pendiente el registro del historial.
 - Hito 4 — Motor de ejecución de alertas (tarea 1 de 3, job programado): **hecho** (selección por frecuencia, ciclo con aislamiento de fallos, APScheduler en el lifespan; 185 tests contra Postgres real). Pendientes la consulta a la BDNS y el registro del historial.
 - Hito 4, Funcionalidad 1 — CRUD de alertas: **hecho** (crear/editar/eliminar, filtros de órgano y región normalizados por id BDNS).

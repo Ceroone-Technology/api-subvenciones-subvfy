@@ -29,7 +29,15 @@ from sqlalchemy import delete, select
 from app.core.security import crear_access_token, hashear_password
 from app.database import AsyncSessionLocal
 from app.main import app
-from app.models import Alerta, Convocatoria, Empresa, Rol, Usuario
+from app.models import (
+    Alerta,
+    AlertaEjecucion,
+    AlertaEjecucionConvocatoria,
+    Convocatoria,
+    Empresa,
+    Rol,
+    Usuario,
+)
 
 NIF_PREFIJO_TEST = "TEST-"
 # Subdominio de example.com (RFC 2606, nunca entregable) y no un TLD
@@ -146,6 +154,15 @@ async def limpiar_datos_de_test() -> AsyncGenerator[None, None]:
         # Postgres comprueba su FK de auditoría created_by -> usuario antes de
         # que esa cascada llegue a borrarlos.
         usuarios_de_test = select(Usuario.id).where(Usuario.email.like(f"%{EMAIL_DOMINIO_TEST}"))
+        # De dentro hacia fuera, y siempre con los usuarios todavía vivos: las
+        # FKs de auditoría de estas tres tablas apuntan a usuario.id.
+        alertas_de_test = select(Alerta.id).where(Alerta.usuario_id.in_(usuarios_de_test))
+        await db.execute(
+            delete(AlertaEjecucionConvocatoria).where(
+                AlertaEjecucionConvocatoria.alerta_id.in_(alertas_de_test)
+            )
+        )
+        await db.execute(delete(AlertaEjecucion).where(AlertaEjecucion.alerta_id.in_(alertas_de_test)))
         await db.execute(delete(Alerta).where(Alerta.usuario_id.in_(usuarios_de_test)))
         # Usuarios primero (sus favoritos caen por ON DELETE CASCADE), luego
         # las convocatorias cacheadas y por ultimo las empresas.

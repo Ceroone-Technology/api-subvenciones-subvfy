@@ -9,13 +9,20 @@ comprobar la frecuencia sin esperar un día.
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.scheduler import JOB_MOTOR_ALERTAS, iniciar_scheduler, parar_scheduler
 from app.database import AsyncSessionLocal
-from app.models import Alerta, AlertaEjecucion, AlertaOrgano, AlertaRegion, Usuario
+from app.models import (
+    Alerta,
+    AlertaEjecucion,
+    AlertaEjecucionConvocatoria,
+    AlertaOrgano,
+    AlertaRegion,
+    Usuario,
+)
 from app.services import motor_alertas
 from app.services.bdns_cliente import ConvocatoriaBdns
 from app.services.bdns_consulta import ConsultaBdns
@@ -27,7 +34,7 @@ from app.services.motor_alertas import (
     procesar_alertas_pendientes,
 )
 from app.services.sistema import EMAIL_SISTEMA, id_usuario_sistema
-from tests.conftest import Sesion
+from tests.conftest import Sesion, codigo_bdns_de_prueba
 
 AHORA = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
 
@@ -75,9 +82,10 @@ class _ClienteBdnsFalso:
     que recibe y no toca la red."""
 
     consultas: list[ConsultaBdns] = []
+    resultados: list[ConvocatoriaBdns] = []
 
     def __init__(self, convocatorias: list[ConvocatoriaBdns] | None = None) -> None:
-        self._convocatorias = convocatorias or []
+        self._convocatorias = convocatorias if convocatorias is not None else type(self).resultados
 
     async def __aenter__(self) -> "_ClienteBdnsFalso":
         return self
@@ -93,15 +101,16 @@ class _ClienteBdnsFalso:
 @pytest.fixture
 def bdns_falsa(monkeypatch: pytest.MonkeyPatch) -> type[_ClienteBdnsFalso]:
     _ClienteBdnsFalso.consultas = []
+    _ClienteBdnsFalso.resultados = []
     monkeypatch.setattr(motor_alertas, "ClienteBdns", _ClienteBdnsFalso)
     return _ClienteBdnsFalso
 
 
-async def _procesar(evaluador: Evaluador | None = None) -> ResumenCiclo:
+async def _procesar(evaluador: Evaluador | None = None, *, ahora: datetime = AHORA) -> ResumenCiclo:
     async with AsyncSessionLocal() as db:
         sistema_id = await id_usuario_sistema(db)
         return await procesar_alertas_pendientes(
-            db, usuario_sistema_id=sistema_id, evaluador=evaluador, ahora=AHORA
+            db, usuario_sistema_id=sistema_id, evaluador=evaluador, ahora=ahora
         )
 
 
@@ -178,7 +187,7 @@ async def test_una_alerta_que_falla_no_frena_a_las_demas(gestor: Sesion) -> None
     rota = await _crear_alerta(gestor.id, nombre="La que revienta")
     sana = await _crear_alerta(gestor.id, nombre="La que va bien")
 
-    async def evaluador(db: AsyncSession, alerta: Alerta) -> None:
+    async def evaluador(db: AsyncSession, alerta: Alerta, usuario_sistema_id: int) -> None:
         if alerta.id == rota:
             raise RuntimeError("la BDNS no responde")
 
@@ -201,9 +210,8 @@ async def test_un_ciclo_sin_alertas_pendientes(usuario_raso: Sesion) -> None:
 async def test_el_evaluador_consulta_la_bdns_con_los_criterios_de_la_alerta(
     gestor: Sesion, bdns_falsa: type[_ClienteBdnsFalso]
 ) -> None:
-    """Tarea 2: se construye la consulta con los criterios y sus filtros. El
-    registro de lo encontrado es la tarea 3, así que aquí no se escribe nada en
-    alerta_ejecucion."""
+    """Se construye la consulta con los criterios y sus filtros, y la ejecución
+    queda registrada aunque no haya resultados."""
     alerta_id = await _crear_alerta(gestor.id, texto_busqueda="pymes")
     async with AsyncSessionLocal() as db:
         db.add_all(
@@ -217,7 +225,8 @@ async def test_el_evaluador_consulta_la_bdns_con_los_criterios_de_la_alerta(
     async with AsyncSessionLocal() as db:
         alerta = await db.get(Alerta, alerta_id)
         assert alerta is not None
-        assert await evaluar_alerta(db, alerta) is None
+        sistema_id = await id_usuario_sistema(db)
+        assert await evaluar_alerta(db, alerta, sistema_id) is None
 
     consulta = bdns_falsa.consultas[-1]
     assert consulta.descripcion == "pymes"
@@ -227,10 +236,11 @@ async def test_el_evaluador_consulta_la_bdns_con_los_criterios_de_la_alerta(
     assert consulta.fecha_desde is not None
 
     async with AsyncSessionLocal() as db:
-        ejecuciones = await db.scalars(
-            select(AlertaEjecucion.id).where(AlertaEjecucion.alerta_id == alerta_id)
-        )
-    assert list(ejecuciones) == []
+        ejecucion = (
+            await db.execute(select(AlertaEjecucion).where(AlertaEjecucion.alerta_id == alerta_id))
+        ).scalar_one()
+    # El doble de la BDNS no devuelve nada, así que la ejecución queda sin novedades.
+    assert (ejecucion.convocatorias_encontradas, ejecucion.estado_envio) == (0, "sin_novedades")
 
 
 async def test_una_alerta_sin_criterios_no_frena_el_ciclo(
@@ -247,6 +257,49 @@ async def test_una_alerta_sin_criterios_no_frena_el_ciclo(
     assert (await _alerta_en_bd(sin_criterios)).ultima_ejecucion_at is None
     # Solo llegó a la BDNS la que sí tenía criterios.
     assert len(bdns_falsa.consultas) == 1
+
+
+async def test_el_ciclo_registra_las_novedades_y_no_las_repite(
+    gestor: Sesion, bdns_falsa: type[_ClienteBdnsFalso]
+) -> None:
+    """De punta a punta: el ciclo consulta, deduplica y escribe el historial que
+    lee GET /alertas/{id}/ejecuciones. Al repetirlo, nada nuevo."""
+    codigo = codigo_bdns_de_prueba()
+    encontrada = ConvocatoriaBdns(
+        id_bdns=1,
+        codigo_bdns=codigo,
+        titulo="Ayudas a la digitalización",
+        fecha_registro=None,
+        nivel1="ESTADO",
+        nivel2="MINISTERIO DE INDUSTRIA",
+        nivel3=None,
+        financiada_mrr=True,
+    )
+    bdns_falsa.resultados = [encontrada]
+    alerta_id = await _crear_alerta(gestor.id)
+
+    primera = await _procesar()
+    assert primera.evaluadas == 1
+
+    # Un día después la alerta vuelve a tocar y la BDNS devuelve lo mismo, así
+    # que esta vez no hay novedad.
+    await _procesar(ahora=AHORA + timedelta(days=1, minutes=1))
+
+    async with AsyncSessionLocal() as db:
+        ejecuciones = list(
+            await db.execute(
+                select(AlertaEjecucion.convocatorias_encontradas, AlertaEjecucion.estado_envio)
+                .where(AlertaEjecucion.alerta_id == alerta_id)
+                .order_by(AlertaEjecucion.id)
+            )
+        )
+        filas_puente = await db.scalar(
+            select(func.count())
+            .select_from(AlertaEjecucionConvocatoria)
+            .where(AlertaEjecucionConvocatoria.alerta_id == alerta_id)
+        )
+    assert ejecuciones == [(1, "pendiente_envio"), (0, "sin_novedades")]
+    assert filas_puente == 1
 
 
 # --- Usuario de sistema -------------------------------------------------
