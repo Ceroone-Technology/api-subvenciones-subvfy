@@ -13,7 +13,6 @@ from app.config import settings
 from app.database import AsyncSessionLocal
 from app.models import Alerta, AlertaEjecucion, AlertaEjecucionConvocatoria, Convocatoria, Usuario
 from app.services import plantillas_email
-from app.services.auditoria import id_usuario_sistema
 from app.services.email import ErrorDeEnvio
 from app.services.notificaciones import (
     ESTADO_ENVIADO,
@@ -21,6 +20,7 @@ from app.services.notificaciones import (
     ESTADO_SIN_NOVEDADES,
     notificar_convocatorias,
 )
+from app.services.sistema import id_usuario_sistema
 from tests.conftest import Sesion, crear_alerta_en_bd, crear_convocatoria_en_bd, crear_sesion_en_bd
 
 

@@ -29,8 +29,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Alerta, AlertaEjecucion, AlertaEjecucionConvocatoria, Convocatoria, Usuario
 from app.services import plantillas_email
-from app.services.auditoria import id_usuario_sistema
 from app.services.email import EnviadorEmail, obtener_enviador
+from app.services.sistema import id_usuario_sistema
 
 logger = logging.getLogger(__name__)
 

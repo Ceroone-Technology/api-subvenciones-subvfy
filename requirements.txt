@@ -18,3 +18,5 @@ anthropic==0.42.0
 # viene en el runtime, pero se fija igualmente para que local y CI coincidan.
 boto3==1.43.100
 apscheduler==3.10.4
+# Cliente HTTP async para consultar la BDNS (y el que ya usan los tests).
+httpx==0.28.1
