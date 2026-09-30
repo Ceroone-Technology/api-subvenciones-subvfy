@@ -33,6 +33,7 @@ from app.models import Alerta, AlertaOrgano, AlertaRegion
 from app.services.bdns_cliente import ClienteBdns
 from app.services.bdns_consulta import construir_consulta
 from app.services.deduplicacion_alertas import filtrar_nuevas, registrar_ejecucion
+from app.services.notificaciones import enviar_aviso
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,19 @@ async def evaluar_alerta(db: AsyncSession, alerta: Alerta, usuario_sistema_id: i
         ejecucion.id,
         ejecucion.estado_envio,
     )
+
+    # El aviso cierra la ejecución que registrar_ejecucion dejó pendiente.
+    # No hace falta comprobar el estado aquí: enviar_aviso ignora lo que no
+    # esté en pendiente_envio, y un fallo de envío no se propaga (queda como
+    # estado "error"), así que no puede tumbar el ciclo de alertas.
+    resultado = await enviar_aviso(db, ejecucion)
+    if resultado.detalle_error:
+        logger.warning(
+            "Alerta %s: la ejecución %s no se pudo avisar (%s).",
+            alerta.id,
+            ejecucion.id,
+            resultado.detalle_error,
+        )
 
 
 async def filtros_de_alerta(db: AsyncSession, alerta_id: int) -> tuple[list[int], list[int]]:

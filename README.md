@@ -358,8 +358,14 @@ entorno manda correo real sin pedirlo explícitamente.
 Estados que registra `alerta_ejecucion.estado_envio`:
 
 - `sin_novedades` — la alerta se evaluó y no había nada nuevo. No se envía correo.
+- `pendiente_envio` — hay novedades registradas y el aviso todavía no ha salido. Es el estado intermedio que deja el motor; el envío lo cierra en `enviado` o `error`.
 - `enviado` — aviso entregado al proveedor (o canal `plataforma`, donde la propia ejecución es el aviso).
 - `error` — había novedades pero no se pudo avisar. El motivo queda en `detalle_error`.
+
+El reparto es deliberado: el motor registra la ejecución y decide qué es novedad;
+el envío solo consume las que están en `pendiente_envio` y las cierra. Por eso
+reintentar un aviso no duplica correos, y un fallo de envío no hace que esas
+convocatorias vuelvan a salir como nuevas en el ciclo siguiente.
 
 Para producción en SES hacen falta dos cosas que no dependen del código:
 verificar el dominio del remitente (SPF y DKIM) y **sacar la cuenta del

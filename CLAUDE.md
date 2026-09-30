@@ -255,10 +255,13 @@ Decisiones cerradas con el usuario — no las reabras sin preguntar:
 - **HTML con marca + alternativa en texto plano**, siempre las dos partes.
 - **Destinatario: el dueño de la alerta** (`alerta.usuario_id`). Las alertas son personales, como los favoritos.
 
-Tres invariantes que sostienen los tests y conviene no romper:
+**La costura con el motor (decidida al integrar las dos ramas)**: `enviar_aviso` **no registra nada**. Quien crea la `alerta_ejecucion`, deduplica y enlaza las convocatorias es `registrar_ejecucion` (motor, `app/services/deduplicacion_alertas.py`), que la deja en `pendiente_envio`. Este servicio recoge ese testigo, manda el correo y la cierra en `enviado` o `error`. Se llegó aquí porque las dos ramas habían escrito su propio registro de ejecución: el del motor es el bueno, porque tiene la deduplicación entre ejecuciones y el `UNIQUE` que la respalda. **No vuelvas a crear ejecuciones desde el envío.**
 
-- **La ejecución se registra pase lo que pase.** Un fallo del proveedor **no se propaga**: se guarda `estado_envio = "error"` con el detalle. Si se relanzara, un SES caído tumbaría la pasada entera de alertas y se perdería el rastro de que se evaluaron.
-- **Las convocatorias notificadas se persisten aunque el envío falle**, en `alerta_ejecucion_convocatoria`. Es lo que impide re-avisar de lo mismo; si se quiere reintentar, la decisión es del motor (F2), no de este servicio.
+Cuatro invariantes que sostienen los tests y conviene no romper:
+
+- **`pendiente_envio` es la cola.** `enviar_aviso` ignora cualquier ejecución en otro estado, así que llamarla dos veces sobre la misma no manda dos correos. Es lo que la hace segura de reintentar (`test_avisar_dos_veces_no_manda_dos_correos`).
+- **Un fallo del proveedor no se propaga**: se cierra en `estado_envio = "error"` con el detalle. Si se relanzara, un SES caído tumbaría la pasada entera de alertas — `evaluar_alerta` llama a `enviar_aviso` dentro del ciclo.
+- **Un fallo de envío no provoca un re-aviso.** Las convocatorias ya las registró el motor antes de intentar el envío, así que siguen contando como notificadas: el precio de un fallo es ese aviso concreto, no un duplicado en el ciclo siguiente (`test_un_fallo_de_envio_no_hace_que_se_re_avise`). Si algún día se quiere reintentar, el sitio es el motor, no este servicio.
 - **Una cuenta no activa cuenta como `error`, no como silencio.** Si alguien deja de recibir avisos por estar bloqueado, tiene que verse en el historial de la alerta.
 
 **`enviar()` es síncrono a propósito** (boto3 bloquea y no tiene versión async); el servicio lo saca del event loop con `asyncio.to_thread`. No lo envuelvas en una corrutina falsa.

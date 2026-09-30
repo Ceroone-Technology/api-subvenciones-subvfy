@@ -1,4 +1,8 @@
-"""Notificación por email y registro de la ejecución (Hito 4, Funcionalidad 3).
+"""Envío del aviso y cierre de la ejecución (Hito 4, Funcionalidad 3).
+
+El servicio ya no registra nada: consume las ejecuciones que el motor deja en
+`pendiente_envio`. Por eso los tests parten de `registrar_ejecucion`, igual
+que en producción, en vez de fabricar filas a mano.
 
 El enviador se inyecta siempre: ningún test toca la red ni depende de
 `EMAIL_BACKEND`.
@@ -7,21 +11,28 @@ El enviador se inyecta siempre: ningún test toca la red ni depende de
 from dataclasses import dataclass
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app.config import settings
 from app.database import AsyncSessionLocal
-from app.models import Alerta, AlertaEjecucion, AlertaEjecucionConvocatoria, Convocatoria, Usuario
+from app.models import Alerta, AlertaEjecucion, Convocatoria, Usuario
 from app.services import plantillas_email
+from app.services.bdns_cliente import ConvocatoriaBdns
+from app.services.deduplicacion_alertas import registrar_ejecucion
 from app.services.email import ErrorDeEnvio
 from app.services.notificaciones import (
     ESTADO_ENVIADO,
     ESTADO_ERROR,
     ESTADO_SIN_NOVEDADES,
-    notificar_convocatorias,
+    enviar_aviso,
 )
 from app.services.sistema import id_usuario_sistema
-from tests.conftest import Sesion, crear_alerta_en_bd, crear_convocatoria_en_bd, crear_sesion_en_bd
+from tests.conftest import (
+    Sesion,
+    codigo_bdns_de_prueba,
+    crear_alerta_en_bd,
+    crear_sesion_en_bd,
+)
 
 
 @dataclass
@@ -45,48 +56,64 @@ class EnviadorDePrueba:
         self.correos.append(Correo(destinatario=destinatario, asunto=asunto, html=html, texto=texto))
 
 
-async def _notificar(alerta_id: int, convocatoria_ids: list[int], enviador: EnviadorDePrueba):
+def _de_la_bdns(titulo: str = "Ayudas a la digitalización", **extra) -> ConvocatoriaBdns:
+    """Una convocatoria como la devolvería la BDNS, con lo mínimo."""
+    campos = {
+        "id_bdns": 0,
+        "codigo_bdns": codigo_bdns_de_prueba(),
+        "titulo": titulo,
+        "fecha_registro": None,
+        "nivel1": "ESTADO",
+        "nivel2": "Estado",
+        "nivel3": "Red.es",
+        "financiada_mrr": False,
+    }
+    campos.update(extra)
+    return ConvocatoriaBdns(**campos)
+
+
+async def _ejecutar(alerta_id: int, convocatorias: list[ConvocatoriaBdns]) -> int:
+    """Registra una ejecución como haría el motor y devuelve su id."""
     async with AsyncSessionLocal() as db:
         alerta = await db.get(Alerta, alerta_id)
         assert alerta is not None
-        convocatorias = []
-        for convocatoria_id in convocatoria_ids:
-            convocatoria = await db.get(Convocatoria, convocatoria_id)
-            assert convocatoria is not None
-            convocatorias.append(convocatoria)
-        return await notificar_convocatorias(db, alerta, convocatorias, enviador=enviador)
+        ejecucion = await registrar_ejecucion(
+            db, alerta, convocatorias, usuario_sistema_id=await id_usuario_sistema(db)
+        )
+        return ejecucion.id
 
 
-# --- Registro de la ejecución --------------------------------------------------
+async def _avisar(ejecucion_id: int, enviador: EnviadorDePrueba):
+    async with AsyncSessionLocal() as db:
+        ejecucion = await db.get(AlertaEjecucion, ejecucion_id)
+        assert ejecucion is not None
+        return await enviar_aviso(db, ejecucion, enviador=enviador)
+
+
+# --- El testigo entre el motor y el aviso --------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_sin_convocatorias_no_envia_pero_registra(gestor: Sesion) -> None:
-    """Sin novedades no se manda correo, pero la pasada queda registrada: es
-    la diferencia entre "no había nada" y "no se ejecutó"."""
+async def test_una_ejecucion_sin_novedades_no_se_avisa(gestor: Sesion) -> None:
+    """El motor la deja en `sin_novedades`, que ya es un estado resuelto: no
+    hay correo ni cambio de estado."""
     alerta_id = await crear_alerta_en_bd(gestor.id)
+    ejecucion_id = await _ejecutar(alerta_id, [])
     enviador = EnviadorDePrueba()
 
-    resultado = await _notificar(alerta_id, [], enviador)
+    resultado = await _avisar(ejecucion_id, enviador)
 
     assert resultado.estado_envio == ESTADO_SIN_NOVEDADES
-    assert resultado.convocatorias_notificadas == 0
     assert enviador.correos == []
-
-    async with AsyncSessionLocal() as db:
-        ejecucion = await db.get(AlertaEjecucion, resultado.ejecucion_id)
-        assert ejecucion is not None
-        assert ejecucion.convocatorias_encontradas == 0
-        assert ejecucion.detalle_error is None
 
 
 @pytest.mark.asyncio
-async def test_con_convocatorias_envia_y_registra_enviado(gestor: Sesion) -> None:
+async def test_una_ejecucion_pendiente_se_avisa_y_se_cierra(gestor: Sesion) -> None:
     alerta_id = await crear_alerta_en_bd(gestor.id, nombre="Kit Digital")
-    convocatoria = await crear_convocatoria_en_bd(titulo="Kit Digital Segmento III")
+    ejecucion_id = await _ejecutar(alerta_id, [_de_la_bdns("Kit Digital Segmento III")])
     enviador = EnviadorDePrueba()
 
-    resultado = await _notificar(alerta_id, [convocatoria.id], enviador)
+    resultado = await _avisar(ejecucion_id, enviador)
 
     assert resultado.estado_envio == ESTADO_ENVIADO
     assert resultado.hubo_correo
@@ -97,54 +124,60 @@ async def test_con_convocatorias_envia_y_registra_enviado(gestor: Sesion) -> Non
     assert "Kit Digital Segmento III" in correo.html
     assert "Kit Digital Segmento III" in correo.texto
 
-
-@pytest.mark.asyncio
-async def test_registra_que_convocatorias_se_notificaron(gestor: Sesion) -> None:
-    """Es lo que impide volver a avisar de lo mismo en la pasada siguiente."""
-    alerta_id = await crear_alerta_en_bd(gestor.id)
-    primera = await crear_convocatoria_en_bd(titulo="Primera")
-    segunda = await crear_convocatoria_en_bd(titulo="Segunda")
-
-    resultado = await _notificar(alerta_id, [primera.id, segunda.id], enviador=EnviadorDePrueba())
-
+    # El estado queda persistido, no solo en el resultado.
     async with AsyncSessionLocal() as db:
-        notificadas = set(
-            await db.scalars(
-                select(AlertaEjecucionConvocatoria.convocatoria_id).where(
-                    AlertaEjecucionConvocatoria.alerta_ejecucion_id == resultado.ejecucion_id
-                )
-            )
-        )
-    assert notificadas == {primera.id, segunda.id}
+        ejecucion = await db.get(AlertaEjecucion, ejecucion_id)
+        assert ejecucion is not None
+        assert ejecucion.estado_envio == ESTADO_ENVIADO
+        assert ejecucion.detalle_error is None
 
 
 @pytest.mark.asyncio
-async def test_actualiza_ultima_ejecucion_de_la_alerta(gestor: Sesion) -> None:
+async def test_avisar_dos_veces_no_manda_dos_correos(gestor: Sesion) -> None:
+    """Segura de reintentar: una vez cerrada, la ejecución ya no está en la
+    cola de `pendiente_envio`."""
     alerta_id = await crear_alerta_en_bd(gestor.id)
-    async with AsyncSessionLocal() as db:
-        alerta = await db.get(Alerta, alerta_id)
-        assert alerta is not None and alerta.ultima_ejecucion_at is None
+    ejecucion_id = await _ejecutar(alerta_id, [_de_la_bdns()])
 
-    await _notificar(alerta_id, [], EnviadorDePrueba())
+    primero = EnviadorDePrueba()
+    segundo = EnviadorDePrueba()
+    await _avisar(ejecucion_id, primero)
+    resultado = await _avisar(ejecucion_id, segundo)
 
-    async with AsyncSessionLocal() as db:
-        alerta = await db.get(Alerta, alerta_id)
-        assert alerta is not None and alerta.ultima_ejecucion_at is not None
+    assert len(primero.correos) == 1
+    assert segundo.correos == []
+    assert resultado.estado_envio == ESTADO_ENVIADO
 
 
 @pytest.mark.asyncio
-async def test_la_ejecucion_la_firma_el_usuario_de_sistema(gestor: Sesion) -> None:
-    """Las filas de un proceso automático no las crea una persona: llevan la
-    identidad que sembró la migración b7f3c21a9d40."""
+async def test_el_correo_lleva_todas_las_convocatorias_de_la_ejecucion(gestor: Sesion) -> None:
     alerta_id = await crear_alerta_en_bd(gestor.id)
-    resultado = await _notificar(alerta_id, [], EnviadorDePrueba())
+    primera = _de_la_bdns("Primera convocatoria")
+    segunda = _de_la_bdns("Segunda convocatoria")
+    ejecucion_id = await _ejecutar(alerta_id, [primera, segunda])
+    enviador = EnviadorDePrueba()
+
+    await _avisar(ejecucion_id, enviador)
+
+    texto = enviador.correos[0].texto
+    assert "Primera convocatoria" in texto
+    assert "Segunda convocatoria" in texto
+    assert plantillas_email.url_convocatoria(primera.codigo_bdns) in texto
+
+
+@pytest.mark.asyncio
+async def test_el_cierre_lo_firma_el_usuario_de_sistema(gestor: Sesion) -> None:
+    alerta_id = await crear_alerta_en_bd(gestor.id)
+    ejecucion_id = await _ejecutar(alerta_id, [_de_la_bdns()])
+
+    await _avisar(ejecucion_id, EnviadorDePrueba())
 
     async with AsyncSessionLocal() as db:
         sistema_id = await id_usuario_sistema(db)
-        ejecucion = await db.get(AlertaEjecucion, resultado.ejecucion_id)
+        ejecucion = await db.get(AlertaEjecucion, ejecucion_id)
         assert ejecucion is not None
-        assert ejecucion.created_by == sistema_id
-        assert ejecucion.created_by != gestor.id
+        assert ejecucion.updated_by == sistema_id
+        assert ejecucion.updated_by != gestor.id
 
 
 # --- Canal y destinatario ------------------------------------------------------
@@ -155,10 +188,10 @@ async def test_canal_plataforma_no_manda_correo(gestor: Sesion) -> None:
     """Con canal "plataforma" la propia ejecución es el aviso: no hay correo,
     y eso no es un error."""
     alerta_id = await crear_alerta_en_bd(gestor.id, canal_notificacion="plataforma")
-    convocatoria = await crear_convocatoria_en_bd()
+    ejecucion_id = await _ejecutar(alerta_id, [_de_la_bdns()])
     enviador = EnviadorDePrueba()
 
-    resultado = await _notificar(alerta_id, [convocatoria.id], enviador)
+    resultado = await _avisar(ejecucion_id, enviador)
 
     assert resultado.estado_envio == ESTADO_ENVIADO
     assert enviador.correos == []
@@ -167,10 +200,10 @@ async def test_canal_plataforma_no_manda_correo(gestor: Sesion) -> None:
 @pytest.mark.asyncio
 async def test_canal_ambos_manda_correo(gestor: Sesion) -> None:
     alerta_id = await crear_alerta_en_bd(gestor.id, canal_notificacion="ambos")
-    convocatoria = await crear_convocatoria_en_bd()
+    ejecucion_id = await _ejecutar(alerta_id, [_de_la_bdns()])
     enviador = EnviadorDePrueba()
 
-    await _notificar(alerta_id, [convocatoria.id], enviador)
+    await _avisar(ejecucion_id, enviador)
 
     assert len(enviador.correos) == 1
 
@@ -179,7 +212,7 @@ async def test_canal_ambos_manda_correo(gestor: Sesion) -> None:
 async def test_no_se_avisa_a_una_cuenta_bloqueada(empresa: dict) -> None:
     sesion = await crear_sesion_en_bd(empresa["id"], "usuario")
     alerta_id = await crear_alerta_en_bd(sesion.id)
-    convocatoria = await crear_convocatoria_en_bd()
+    ejecucion_id = await _ejecutar(alerta_id, [_de_la_bdns()])
     async with AsyncSessionLocal() as db:
         usuario = await db.get(Usuario, sesion.id)
         assert usuario is not None
@@ -187,7 +220,7 @@ async def test_no_se_avisa_a_una_cuenta_bloqueada(empresa: dict) -> None:
         await db.commit()
 
     enviador = EnviadorDePrueba()
-    resultado = await _notificar(alerta_id, [convocatoria.id], enviador)
+    resultado = await _avisar(ejecucion_id, enviador)
 
     assert enviador.correos == []
     # Queda como error y no en silencio: si alguien deja de recibir avisos
@@ -204,28 +237,40 @@ async def test_un_fallo_de_ses_no_propaga_y_queda_registrado(gestor: Sesion) -> 
     """Un proveedor caído no puede tumbar la pasada de alertas ni borrar el
     rastro de que la alerta se evaluó."""
     alerta_id = await crear_alerta_en_bd(gestor.id)
-    convocatoria = await crear_convocatoria_en_bd()
+    ejecucion_id = await _ejecutar(alerta_id, [_de_la_bdns()])
     enviador = EnviadorDePrueba(fallo=ErrorDeEnvio("SES no disponible"))
 
-    resultado = await _notificar(alerta_id, [convocatoria.id], enviador)
+    resultado = await _avisar(ejecucion_id, enviador)
 
     assert resultado.estado_envio == ESTADO_ERROR
     assert resultado.detalle_error is not None
     assert "SES no disponible" in resultado.detalle_error
 
     async with AsyncSessionLocal() as db:
-        ejecucion = await db.get(AlertaEjecucion, resultado.ejecucion_id)
+        ejecucion = await db.get(AlertaEjecucion, ejecucion_id)
         assert ejecucion is not None
         assert ejecucion.estado_envio == ESTADO_ERROR
         assert ejecucion.convocatorias_encontradas == 1
-        # Aunque el correo fallara, la convocatoria queda marcada como
-        # tratada: el reintento lo decide el motor, no este servicio.
-        enlazadas = await db.scalar(
-            select(func.count())
-            .select_from(AlertaEjecucionConvocatoria)
-            .where(AlertaEjecucionConvocatoria.alerta_ejecucion_id == ejecucion.id)
-        )
-        assert enlazadas == 1
+
+
+@pytest.mark.asyncio
+async def test_un_fallo_de_envio_no_hace_que_se_re_avise(gestor: Sesion) -> None:
+    """Las convocatorias las registró el motor antes de intentar el envío, así
+    que siguen contando como ya notificadas: el precio de un fallo es ese
+    aviso, no un duplicado en el ciclo siguiente."""
+    alerta_id = await crear_alerta_en_bd(gestor.id)
+    convocatoria = _de_la_bdns()
+    ejecucion_id = await _ejecutar(alerta_id, [convocatoria])
+    await _avisar(ejecucion_id, EnviadorDePrueba(fallo=ErrorDeEnvio("SES no disponible")))
+
+    # El motor vuelve a pasar y la BDNS le devuelve lo mismo.
+    segunda_id = await _ejecutar(alerta_id, [convocatoria])
+
+    async with AsyncSessionLocal() as db:
+        segunda = await db.get(AlertaEjecucion, segunda_id)
+        assert segunda is not None
+        assert segunda.convocatorias_encontradas == 0
+        assert segunda.estado_envio == ESTADO_SIN_NOVEDADES
 
 
 # --- Contenido del correo ------------------------------------------------------
@@ -294,3 +339,41 @@ def test_la_descripcion_omite_los_campos_que_faltan() -> None:
     assert "Mínima" in html
     assert " · ·" not in html
     assert "MRR" not in html
+
+
+# --- Consulta auxiliar ---------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_convocatorias_de_solo_devuelve_las_de_esa_ejecucion(gestor: Sesion) -> None:
+    from app.services.notificaciones import convocatorias_de
+
+    alerta_id = await crear_alerta_en_bd(gestor.id)
+    primera = _de_la_bdns("De la primera pasada")
+    segunda = _de_la_bdns("De la segunda pasada")
+    ejecucion_1 = await _ejecutar(alerta_id, [primera])
+    ejecucion_2 = await _ejecutar(alerta_id, [segunda])
+
+    async with AsyncSessionLocal() as db:
+        titulos_1 = [c.titulo for c in await convocatorias_de(db, ejecucion_1)]
+        titulos_2 = [c.titulo for c in await convocatorias_de(db, ejecucion_2)]
+
+    assert titulos_1 == ["De la primera pasada"]
+    assert titulos_2 == ["De la segunda pasada"]
+
+
+@pytest.mark.asyncio
+async def test_la_convocatoria_queda_cacheada_con_los_datos_de_la_bdns(gestor: Sesion) -> None:
+    alerta_id = await crear_alerta_en_bd(gestor.id)
+    convocatoria = _de_la_bdns("Ayudas I+D+i", nivel3="Agencia IDEA")
+    await _ejecutar(alerta_id, [convocatoria])
+
+    async with AsyncSessionLocal() as db:
+        cacheada = (
+            await db.execute(
+                select(Convocatoria).where(Convocatoria.codigo_bdns == convocatoria.codigo_bdns)
+            )
+        ).scalar_one()
+    assert cacheada.titulo == "Ayudas I+D+i"
+    assert cacheada.organo_convocante == "Agencia IDEA"
+    assert cacheada.nivel_administracion == "estado"

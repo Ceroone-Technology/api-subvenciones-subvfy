@@ -298,7 +298,10 @@ async def test_el_ciclo_registra_las_novedades_y_no_las_repite(
             .select_from(AlertaEjecucionConvocatoria)
             .where(AlertaEjecucionConvocatoria.alerta_id == alerta_id)
         )
-    assert ejecuciones == [(1, "pendiente_envio"), (0, "sin_novedades")]
+    # "enviado" y no "pendiente_envio": desde el Hito 4 F3 el ciclo encadena el
+    # aviso (evaluar_alerta llama a enviar_aviso), que cierra la ejecucion. En
+    # tests el backend de correo es "consola", asi que no sale nada a la red.
+    assert ejecuciones == [(1, "enviado"), (0, "sin_novedades")]
     assert filas_puente == 1
 
 
