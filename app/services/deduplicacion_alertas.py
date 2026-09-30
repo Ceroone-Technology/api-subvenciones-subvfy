@@ -49,12 +49,33 @@ async def filtrar_nuevas(
 ) -> list[ConvocatoriaBdns]:
     """Las que esta alerta no ha notificado nunca, en una sola consulta.
 
+    Antes de comparar con lo ya notificado se descarta lo que no se puede
+    cachear: sin `codigo_bdns` no hay con qué identificarla, y **sin título
+    tampoco vale**, porque `convocatoria.titulo` es NOT NULL y rellenarlo con
+    un texto de relleno machacaría el título real que hubiera guardado un
+    favorito (ver el upsert de abajo). El descarte va **antes** de la
+    deduplicación a propósito: así una convocatoria descartada no queda
+    marcada como vista y vuelve a entrar si la BDNS la publica completa.
+
     También deduplica **dentro del lote**: la BDNS puede repetir un código
     entre páginas, y sin esto el `INSERT` chocaría consigo mismo.
     """
     del_lote: dict[str, ConvocatoriaBdns] = {}
     for convocatoria in convocatorias:
-        if convocatoria.codigo_bdns and convocatoria.codigo_bdns not in del_lote:
+        if not convocatoria.codigo_bdns:
+            logger.warning("BDNS: convocatoria sin código, descartada (id %s).", convocatoria.id_bdns)
+            continue
+        if not (convocatoria.titulo or "").strip():
+            # Se avisa en vez de descartar en silencio: si la BDNS empieza a
+            # devolver fichas sin título, esto es lo que lo delata. Como no
+            # queda registrada, el aviso se repetirá en cada ciclo mientras
+            # siga llegando así.
+            logger.warning(
+                "BDNS: convocatoria %s sin título, descartada (no se puede cachear).",
+                convocatoria.codigo_bdns,
+            )
+            continue
+        if convocatoria.codigo_bdns not in del_lote:
             del_lote[convocatoria.codigo_bdns] = convocatoria
     if not del_lote:
         return []
@@ -129,7 +150,7 @@ async def _cachear_convocatorias(
     filas = [
         {
             "codigo_bdns": convocatoria.codigo_bdns,
-            "titulo": convocatoria.titulo or "(sin título)",
+            "titulo": convocatoria.titulo,
             "nivel_administracion": NIVEL_BDNS_A_NUESTRO.get((convocatoria.nivel1 or "").upper()),
             "administracion": convocatoria.nivel2,
             "organo_convocante": convocatoria.nivel3 or convocatoria.nivel2,
