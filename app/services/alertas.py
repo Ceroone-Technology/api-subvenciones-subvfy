@@ -133,10 +133,17 @@ async def actualizar_alerta(
 
     # Firma explícita: si solo cambian los filtros (filas hijas), la fila de
     # la alerta no queda sucia y el `onupdate` de updated_at no saltaría.
+    # Editar la alerta también borra la espera del motor por fallos previos:
+    # quien corrige unos criterios no espera hasta 24 h para verlo funcionar.
     await db.execute(
         update(Alerta)
         .where(Alerta.id == alerta_id)
-        .values(updated_at=func.now(), updated_by=usuario_id)
+        .values(
+            updated_at=func.now(),
+            updated_by=usuario_id,
+            fallos_consecutivos=0,
+            proximo_reintento_at=None,
+        )
     )
     await db.commit()
     return await _leer(db, alerta_id)

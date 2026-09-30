@@ -9,6 +9,7 @@ comprobar la frecuencia sin esperar un día.
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from httpx import AsyncClient
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +27,7 @@ from app.models import (
 from app.services import motor_alertas
 from app.services.bdns_cliente import ConvocatoriaBdns
 from app.services.bdns_consulta import ConsultaBdns
+from app.services.deduplicacion_alertas import MAX_DETALLE_ERROR, detalle_de_error, espera_reintento, registrar_fallo
 from app.services.motor_alertas import (
     Evaluador,
     ResumenCiclo,
@@ -47,6 +49,8 @@ async def _crear_alerta(
     ultima_ejecucion_at: datetime | None = None,
     nombre: str = "Alerta del motor",
     texto_busqueda: str | None = "digitalización",
+    fallos_consecutivos: int = 0,
+    proximo_reintento_at: datetime | None = None,
 ) -> int:
     """Con un criterio por defecto: una alerta sin ninguno no se puede
     consultar en la BDNS, y eso tiene su propio test."""
@@ -58,6 +62,8 @@ async def _crear_alerta(
             activa=activa,
             ultima_ejecucion_at=ultima_ejecucion_at,
             texto_busqueda=texto_busqueda,
+            fallos_consecutivos=fallos_consecutivos,
+            proximo_reintento_at=proximo_reintento_at,
             created_by=usuario_id,
         )
         db.add(alerta)
@@ -72,9 +78,9 @@ async def _alerta_en_bd(alerta_id: int) -> Alerta:
     return alerta
 
 
-async def _ids_pendientes() -> list[int]:
+async def _ids_pendientes(ahora: datetime = AHORA) -> list[int]:
     async with AsyncSessionLocal() as db:
-        return [alerta.id for alerta in await alertas_pendientes(db, ahora=AHORA)]
+        return [alerta.id for alerta in await alertas_pendientes(db, ahora=ahora)]
 
 
 class _ClienteBdnsFalso:
@@ -194,10 +200,11 @@ async def test_una_alerta_que_falla_no_frena_a_las_demas(gestor: Sesion) -> None
     resumen = await _procesar(evaluador)
     assert (resumen.evaluadas, resumen.fallidas) == (1, 1)
 
-    # La sana avanza; la rota no, así que el ciclo siguiente la reintenta.
+    # La sana avanza; la rota no, y se reintenta cuando acaba su espera.
     assert (await _alerta_en_bd(sana)).ultima_ejecucion_at == AHORA
     assert (await _alerta_en_bd(rota)).ultima_ejecucion_at is None
-    assert rota in await _ids_pendientes()
+    assert rota not in await _ids_pendientes()
+    assert rota in await _ids_pendientes(AHORA + timedelta(minutes=15))
 
 
 async def test_un_ciclo_sin_alertas_pendientes(usuario_raso: Sesion) -> None:
@@ -300,6 +307,194 @@ async def test_el_ciclo_registra_las_novedades_y_no_las_repite(
         )
     assert ejecuciones == [(1, "pendiente_envio"), (0, "sin_novedades")]
     assert filas_puente == 1
+
+
+# --- Fallos y reintentos ------------------------------------------------
+
+
+def _convocatoria_que_postgres_rechaza(titulo: str) -> ConvocatoriaBdns:
+    """Pasa todos los filtros de `filtrar_nuevas` y revienta en el upsert: el
+    NUL no cabe en un TEXT de Postgres. Es un fallo real de la base de datos,
+    no un doble."""
+    return ConvocatoriaBdns(
+        id_bdns=1,
+        codigo_bdns=codigo_bdns_de_prueba(),
+        titulo=titulo,
+        fecha_registro=None,
+        nivel1="ESTADO",
+        nivel2=None,
+        nivel3=None,
+        financiada_mrr=False,
+    )
+
+
+async def _ejecuciones_de(alerta_id: int) -> list[tuple[int, str, str | None]]:
+    async with AsyncSessionLocal() as db:
+        return [
+            tuple(fila)
+            for fila in await db.execute(
+                select(
+                    AlertaEjecucion.convocatorias_encontradas,
+                    AlertaEjecucion.estado_envio,
+                    AlertaEjecucion.detalle_error,
+                )
+                .where(AlertaEjecucion.alerta_id == alerta_id)
+                .order_by(AlertaEjecucion.id)
+            )
+        ]
+
+
+async def _siempre_falla(db: AsyncSession, alerta: Alerta, usuario_sistema_id: int) -> None:
+    raise RuntimeError("la BDNS no responde")
+
+
+async def test_un_fallo_del_upsert_deja_rastro_y_no_avanza_la_alerta(
+    gestor: Sesion, client_gestor: AsyncClient, bdns_falsa: type[_ClienteBdnsFalso]
+) -> None:
+    """El caso del issue: el rollback del upsert se llevaba la fila de
+    `alerta_ejecucion` y la alerta no dejaba rastro."""
+    bdns_falsa.resultados = [_convocatoria_que_postgres_rechaza("SECRETO-DEL-TITULO\x00")]
+    alerta_id = await _crear_alerta(gestor.id)
+
+    resumen = await _procesar()
+    assert (resumen.evaluadas, resumen.fallidas) == (0, 1)
+
+    [(encontradas, estado, detalle)] = await _ejecuciones_de(alerta_id)
+    assert (encontradas, estado) == (0, "error")
+    assert detalle is not None and detalle.startswith("[ejecución] DBAPIError: ")
+    # El detalle sale por la API: no puede arrastrar los parámetros del INSERT.
+    assert "SECRETO-DEL-TITULO" not in detalle
+
+    alerta = await _alerta_en_bd(alerta_id)
+    # `ultima_ejecucion_at` es el `desde` de la consulta: avanzarlo perdería lo
+    # publicado entre el fallo y el reintento.
+    assert alerta.ultima_ejecucion_at is None
+    assert alerta.fallos_consecutivos == 1
+    assert alerta.proximo_reintento_at == AHORA + timedelta(minutes=15)
+
+    async with AsyncSessionLocal() as db:
+        puente = await db.scalar(
+            select(func.count())
+            .select_from(AlertaEjecucionConvocatoria)
+            .where(AlertaEjecucionConvocatoria.alerta_id == alerta_id)
+        )
+    assert puente == 0
+
+    # Y es visible en el historial que consulta el frontend.
+    respuesta = await client_gestor.get(f"/alertas/{alerta_id}/ejecuciones", params={"estado_envio": "error"})
+    assert respuesta.status_code == 200, respuesta.text
+    assert [item["detalle_error"] for item in respuesta.json()["items"]] == [detalle]
+
+
+async def test_una_alerta_con_criterios_invalidos_tambien_deja_rastro(
+    gestor: Sesion, bdns_falsa: type[_ClienteBdnsFalso]
+) -> None:
+    alerta_id = await _crear_alerta(gestor.id, texto_busqueda=None)
+
+    await _procesar()
+
+    [(_, estado, detalle)] = await _ejecuciones_de(alerta_id)
+    assert estado == "error"
+    assert detalle is not None and "CriteriosAlertaInvalidos" in detalle
+
+
+async def test_una_alerta_en_espera_no_toca_hasta_que_vence(gestor: Sesion) -> None:
+    alerta_id = await _crear_alerta(gestor.id)
+    await _procesar(_siempre_falla)
+
+    assert alerta_id not in await _ids_pendientes(AHORA + timedelta(minutes=14))
+    assert alerta_id in await _ids_pendientes(AHORA + timedelta(minutes=15))
+
+
+async def test_fallar_otra_vez_alarga_la_espera(gestor: Sesion) -> None:
+    alerta_id = await _crear_alerta(gestor.id)
+
+    primero = AHORA
+    await _procesar(_siempre_falla, ahora=primero)
+    segundo = primero + timedelta(minutes=15)
+    await _procesar(_siempre_falla, ahora=segundo)
+
+    alerta = await _alerta_en_bd(alerta_id)
+    assert alerta.fallos_consecutivos == 2
+    assert alerta.proximo_reintento_at == segundo + timedelta(minutes=30)
+    assert [estado for _, estado, _ in await _ejecuciones_de(alerta_id)] == ["error", "error"]
+    # Y nunca avanzó el punto desde el que se consulta la BDNS.
+    assert alerta.ultima_ejecucion_at is None
+
+
+def test_la_espera_crece_al_doble_y_tiene_tope() -> None:
+    minutos = [espera_reintento(n).total_seconds() / 60 for n in range(1, 10)]
+    assert minutos == [15, 30, 60, 120, 240, 480, 960, 1440, 1440]
+    # Sin desbordar con contadores absurdos.
+    assert espera_reintento(10_000) == timedelta(hours=24)
+    assert espera_reintento(0) == timedelta(minutes=15)
+
+
+async def test_un_exito_reinicia_la_espera(gestor: Sesion) -> None:
+    alerta_id = await _crear_alerta(
+        gestor.id, fallos_consecutivos=3, proximo_reintento_at=AHORA - timedelta(minutes=1)
+    )
+    assert alerta_id in await _ids_pendientes()
+
+    async def evaluador(db: AsyncSession, alerta: Alerta, usuario_sistema_id: int) -> None:
+        return None
+
+    await _procesar(evaluador)
+
+    alerta = await _alerta_en_bd(alerta_id)
+    assert (alerta.fallos_consecutivos, alerta.proximo_reintento_at) == (0, None)
+    assert alerta.ultima_ejecucion_at == AHORA
+
+
+async def test_una_alerta_rota_no_desplaza_a_las_sanas(gestor: Sesion) -> None:
+    """Sin espera, la rota (nunca ejecutada, id menor) saldría siempre la
+    primera y, con el tope por ciclo, dejaría sin turno a las demás."""
+    rota = await _crear_alerta(gestor.id, nombre="Rota", proximo_reintento_at=AHORA + timedelta(hours=1))
+    sana = await _crear_alerta(gestor.id, nombre="Sana")
+
+    async with AsyncSessionLocal() as db:
+        elegidas = [alerta.id for alerta in await alertas_pendientes(db, ahora=AHORA, limite=1)]
+    assert elegidas == [sana]
+    assert rota not in elegidas
+
+
+async def test_si_falla_el_registro_del_fallo_el_ciclo_sigue(
+    gestor: Sesion, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rota = await _crear_alerta(gestor.id, nombre="La que revienta")
+    sana = await _crear_alerta(gestor.id, nombre="La que va bien")
+
+    async def evaluador(db: AsyncSession, alerta: Alerta, usuario_sistema_id: int) -> None:
+        if alerta.id == rota:
+            raise RuntimeError("la BDNS no responde")
+
+    async def registro_roto(*args: object, **kwargs: object) -> None:
+        raise ConnectionError("la base de datos se ha caído")
+
+    monkeypatch.setattr(motor_alertas, "registrar_fallo", registro_roto)
+
+    resumen = await _procesar(evaluador)
+
+    assert (resumen.evaluadas, resumen.fallidas) == (1, 1)
+    assert (await _alerta_en_bd(sana)).ultima_ejecucion_at == AHORA
+    assert (await _alerta_en_bd(rota)).ultima_ejecucion_at is None
+
+
+async def test_registrar_el_fallo_de_una_alerta_borrada_no_hace_nada(gestor: Sesion) -> None:
+    async with AsyncSessionLocal() as db:
+        sistema_id = await id_usuario_sistema(db)
+        ejecucion = await registrar_fallo(
+            db, -1, RuntimeError("x"), usuario_sistema_id=sistema_id, ahora=AHORA
+        )
+    assert ejecucion is None
+
+
+def test_el_detalle_del_error_es_corto_y_de_una_linea() -> None:
+    largo = detalle_de_error(ValueError("línea 1\nlínea 2 con datos\n" + "x" * 2000))
+    assert "\n" not in largo and "línea 2" not in largo
+    assert largo.startswith("[ejecución] ValueError: línea 1")
+    assert len(detalle_de_error(ValueError("x" * 2000))) == MAX_DETALLE_ERROR
+    assert detalle_de_error(RuntimeError()) == "[ejecución] RuntimeError: "
 
 
 # --- Usuario de sistema -------------------------------------------------
