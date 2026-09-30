@@ -35,6 +35,19 @@ logger = logging.getLogger(__name__)
 # Los niveles de la BDNS vienen en texto (`nivel1`) y hay que traducirlos a los
 # valores del CHECK de `convocatoria`. Se deriva del mapa de la consulta para
 # no mantener dos tablas de equivalencias.
+def _limite(columna: str) -> int:
+    """Longitud máxima de una columna de texto de `convocatoria`.
+
+    Se lee del modelo y no se escribe a mano: si mañana cambia el esquema, el
+    recorte cambia con él y no hay dos verdades.
+    """
+    tipo = Convocatoria.__table__.c[columna].type
+    longitud = getattr(tipo, "length", None)
+    if longitud is None:  # pragma: no cover - solo si alguien quita el String(n)
+        raise RuntimeError(f"La columna convocatoria.{columna} ya no tiene longitud máxima.")
+    return int(longitud)
+
+
 NIVEL_BDNS_A_NUESTRO = {
     "ESTADO": "estado",
     "AUTONOMICA": "ccaa",
@@ -50,8 +63,8 @@ async def filtrar_nuevas(
     """Las que esta alerta no ha notificado nunca, en una sola consulta.
 
     Antes de comparar con lo ya notificado se descarta lo que no se puede
-    cachear: sin `codigo_bdns` no hay con qué identificarla, y **sin título
-    tampoco vale**, porque `convocatoria.titulo` es NOT NULL y rellenarlo con
+    cachear: sin `codigo_bdns` (o con uno que no cabe en la columna) no hay con
+    qué identificarla, y **sin título tampoco vale**, porque `convocatoria.titulo` es NOT NULL y rellenarlo con
     un texto de relleno machacaría el título real que hubiera guardado un
     favorito (ver el upsert de abajo). El descarte va **antes** de la
     deduplicación a propósito: así una convocatoria descartada no queda
@@ -64,6 +77,16 @@ async def filtrar_nuevas(
     for convocatoria in convocatorias:
         if not convocatoria.codigo_bdns:
             logger.warning("BDNS: convocatoria sin código, descartada (id %s).", convocatoria.id_bdns)
+            continue
+        if len(convocatoria.codigo_bdns) > _limite("codigo_bdns"):
+            # Este no se recorta: el código es la **identidad** (clave del
+            # ON CONFLICT, y lo que usan el frontend y los favoritos para
+            # emparejar). Truncarlo inventaría una convocatoria o pisaría otra.
+            logger.warning(
+                "BDNS: código %r demasiado largo (%d caracteres), descartada.",
+                convocatoria.codigo_bdns,
+                len(convocatoria.codigo_bdns),
+            )
             continue
         if not (convocatoria.titulo or "").strip():
             # Se avisa en vez de descartar en silencio: si la BDNS empieza a
@@ -137,6 +160,33 @@ async def registrar_ejecucion(
     return ejecucion
 
 
+def _recortar(valor: str | None, limite: int, *, codigo_bdns: str | None = None, campo: str = "") -> str | None:
+    """Recorta a la longitud de la columna, y trata la cadena vacía como nula.
+
+    Lo segundo no es un descuido: `""` sobreviviría al `COALESCE` del upsert y
+    machacaría con nada un valor ya cacheado. Devolviendo `None`, se conserva.
+
+    Postgres **no recorta**: aborta la sentencia. Y como el registro va en una
+    sola transacción, ese error se llevaría por delante la fila de
+    `alerta_ejecucion`, dejaría `ultima_ejecucion_at` sin avanzar y la alerta
+    fallaría en bucle en cada ciclo. De ahí que se recorte aquí.
+    """
+    if not valor:
+        return None
+    if len(valor) > limite:
+        # Se pierde texto de la fuente: que se vea. Sale una vez por
+        # convocatoria, porque después la dedup ya la salta.
+        logger.warning(
+            "BDNS: %s de la convocatoria %s recortado de %d a %d caracteres.",
+            campo or "campo",
+            codigo_bdns,
+            len(valor),
+            limite,
+        )
+        return valor[:limite]
+    return valor
+
+
 async def _cachear_convocatorias(
     db: AsyncSession, convocatorias: Sequence[ConvocatoriaBdns], usuario_sistema_id: int
 ) -> dict[str, int]:
@@ -167,13 +217,27 @@ async def _cachear_convocatorias(
     filas = [
         {
             "codigo_bdns": convocatoria.codigo_bdns,
-            "titulo": convocatoria.titulo,
+            "titulo": _recortar(
+                convocatoria.titulo, _limite("titulo"), codigo_bdns=convocatoria.codigo_bdns, campo="título"
+            ),
+            # nivel_administracion no se recorta: su valor sale de nuestro mapa
+            # (estado/ccaa/local/otros) o es None, así que nunca pasa de 20.
             "nivel_administracion": NIVEL_BDNS_A_NUESTRO.get((convocatoria.nivel1 or "").upper()),
-            "administracion": convocatoria.nivel2,
+            "administracion": _recortar(
+                convocatoria.nivel2,
+                _limite("administracion"),
+                codigo_bdns=convocatoria.codigo_bdns,
+                campo="administración",
+            ),
             # Sin respaldo a nivel2: si nivel3 viene vacío, lo que toca es
             # dejar que el COALESCE conserve el órgano cacheado, que es más
             # específico, en vez de sustituirlo por la administración.
-            "organo_convocante": convocatoria.nivel3,
+            "organo_convocante": _recortar(
+                convocatoria.nivel3,
+                _limite("organo_convocante"),
+                codigo_bdns=convocatoria.codigo_bdns,
+                campo="órgano convocante",
+            ),
             "fecha_registro": convocatoria.fecha_registro,
             "financiada_mrr": convocatoria.financiada_mrr,
             "created_by": usuario_sistema_id,
