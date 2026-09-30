@@ -5,7 +5,7 @@ de datos real y comprueban en ella lo que se ha persistido: la respuesta
 podría estar bien aunque las filas hijas no lo estuvieran.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 from httpx import AsyncClient
@@ -159,6 +159,26 @@ async def test_patch_parcial_solo_toca_lo_enviado(client_gestor: AsyncClient) ->
     assert editada["organos"] == [42]
     assert editada["regiones"] == [9]
     assert datetime.fromisoformat(editada["updated_at"]) > datetime.fromisoformat(creada["updated_at"])
+
+
+async def test_patch_reinicia_la_espera_por_fallos_del_motor(client_gestor: AsyncClient) -> None:
+    """Quien corrige una alerta que fallaba no espera hasta 24 h para verla
+    funcionar: editarla borra el contador y la espera."""
+    creada = await _crear(client_gestor)
+    async with AsyncSessionLocal() as db:
+        alerta = await db.get(Alerta, creada["id"])
+        assert alerta is not None
+        alerta.fallos_consecutivos = 4
+        alerta.proximo_reintento_at = datetime(2099, 1, 1, tzinfo=UTC)
+        await db.commit()
+
+    respuesta = await client_gestor.patch(f"/alertas/{creada['id']}", json={"nombre": "Arreglada"})
+    assert respuesta.status_code == 200, respuesta.text
+
+    async with AsyncSessionLocal() as db:
+        alerta = await db.get(Alerta, creada["id"])
+    assert alerta is not None
+    assert (alerta.fallos_consecutivos, alerta.proximo_reintento_at) == (0, None)
 
 
 async def test_patch_de_filtros_reemplaza_la_lista(client_gestor: AsyncClient) -> None:

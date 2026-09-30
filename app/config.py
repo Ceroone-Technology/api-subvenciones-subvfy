@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     scheduler_habilitado: bool = False
     scheduler_intervalo_minutos: int = 15
 
+    # Espera entre reintentos de una alerta que falla: base × 2^(fallos-1),
+    # con tope. Sin esto, una alerta rota se reintentaría en cada ciclo.
+    alertas_reintento_base_minutos: int = 15
+    alertas_reintento_max_horas: int = 24
+
     # CORS — orígenes permitidos, separados por coma
     cors_origins: str = "http://localhost:4200"
 
