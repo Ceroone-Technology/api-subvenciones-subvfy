@@ -23,18 +23,19 @@ from tests.conftest import Sesion, codigo_bdns_de_prueba
 
 
 def _resultado(
-    codigo: str, *, titulo: str | None = "Convocatoria detectada", mrr: bool = False
+    codigo: str, *, titulo: str | None = "Convocatoria detectada", mrr: bool = False, **campos: object
 ) -> ConvocatoriaBdns:
-    return ConvocatoriaBdns(
-        id_bdns=abs(hash(codigo)) % 10**8,
-        codigo_bdns=codigo,
-        titulo=titulo,
-        fecha_registro=date(2026, 9, 20),
-        nivel1="AUTONOMICA",
-        nivel2="JUNTA DE ANDALUCIA",
-        nivel3="CONSEJERIA DE EMPLEO",
-        financiada_mrr=mrr,
-    )
+    ficha: dict[str, object] = {
+        "id_bdns": abs(hash(codigo)) % 10**8,
+        "codigo_bdns": codigo,
+        "titulo": titulo,
+        "fecha_registro": date(2026, 9, 20),
+        "nivel1": "AUTONOMICA",
+        "nivel2": "JUNTA DE ANDALUCIA",
+        "nivel3": "CONSEJERIA DE EMPLEO",
+        "financiada_mrr": mrr,
+    }
+    return ConvocatoriaBdns(**{**ficha, **campos})  # type: ignore[arg-type]
 
 
 async def _crear_alerta(usuario_id: int, nombre: str = "Alerta con novedades") -> Alerta:
@@ -391,3 +392,72 @@ async def test_un_titulo_nuevo_si_actualiza_la_cache(gestor: Sesion) -> None:
     await _procesar(alerta, [_resultado(codigo, titulo="Título corregido por la BDNS")])
 
     assert (await _cacheada(codigo)).titulo == "Título corregido por la BDNS"
+
+
+# --- Longitudes de columna ----------------------------------------------
+
+
+def _limite(columna: str) -> int:
+    """Del modelo, no a mano: si cambia el esquema, el test cambia con él."""
+    return Convocatoria.__table__.c[columna].type.length
+
+
+@pytest.mark.parametrize(
+    ("campo_bdns", "columna"),
+    [("titulo", "titulo"), ("nivel2", "administracion"), ("nivel3", "organo_convocante")],
+)
+async def test_un_texto_mas_largo_que_la_columna_se_recorta(
+    gestor: Sesion, campo_bdns: str, columna: str
+) -> None:
+    """Postgres no recorta: aborta la sentencia. Y como el registro va en una
+    transacción, ese error se llevaba también la fila de alerta_ejecucion y
+    dejaba la alerta fallando en bucle. Aquí se comprueba lo contrario: se
+    recorta y la ejecución queda registrada."""
+    alerta = await _crear_alerta(gestor.id)
+    codigo = codigo_bdns_de_prueba()
+    limite = _limite(columna)
+    largo = "L" * (limite + 100)
+
+    ejecucion = await _procesar(alerta, [_resultado(codigo, **{campo_bdns: largo})])
+
+    assert ejecucion.convocatorias_encontradas == 1  # la ejecución sí se registra
+    assert ejecucion.estado_envio == "pendiente_envio"
+    cacheada = await _cacheada(codigo)
+    assert getattr(cacheada, columna) == "L" * limite
+
+
+async def test_un_codigo_mas_largo_que_la_columna_se_descarta(gestor: Sesion) -> None:
+    """El código es la identidad (clave del ON CONFLICT), así que no se recorta:
+    truncarlo inventaría una convocatoria o pisaría otra."""
+    alerta = await _crear_alerta(gestor.id)
+    valida = codigo_bdns_de_prueba()
+    demasiado_largo = "X" * (_limite("codigo_bdns") + 1)
+
+    ejecucion = await _procesar(alerta, [_resultado(demasiado_largo), _resultado(valida)])
+
+    assert ejecucion.convocatorias_encontradas == 1
+    assert await _notificadas(alerta.id) == [valida]
+
+
+async def test_un_organo_vacio_no_machaca_el_cacheado(gestor: Sesion) -> None:
+    """Por eso `_recortar` devuelve None para la cadena vacía: "" sobreviviría
+    al COALESCE y borraría el órgano ya guardado."""
+    codigo = codigo_bdns_de_prueba()
+    await _cachear(codigo, gestor.id, titulo="Ficha completa", organo_convocante="Red.es")
+    alerta = await _crear_alerta(gestor.id)
+
+    await _procesar(alerta, [_resultado(codigo, nivel3="")])
+
+    assert (await _cacheada(codigo)).organo_convocante == "Red.es"
+
+
+async def test_mrr_en_false_corrige_lo_cacheado(gestor: Sesion) -> None:
+    """financiada_mrr va fuera del COALESCE a propósito: la BDNS lo envía
+    siempre, así que un False es una corrección real, no un dato ausente."""
+    codigo = codigo_bdns_de_prueba()
+    await _cachear(codigo, gestor.id, titulo="Ficha completa", financiada_mrr=True)
+    alerta = await _crear_alerta(gestor.id)
+
+    await _procesar(alerta, [_resultado(codigo, mrr=False)])
+
+    assert (await _cacheada(codigo)).financiada_mrr is False
