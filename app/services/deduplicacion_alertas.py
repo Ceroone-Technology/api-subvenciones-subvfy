@@ -156,6 +156,13 @@ async def _cachear_convocatorias(
     `financiada_mrr` sí se sobrescribe siempre: es el único campo fuera del
     COALESCE, porque la BDNS manda `mrr` en todas las filas y para un booleano
     vale lo último que diga la fuente.
+
+    Y un detalle de Postgres: para `titulo`, que es NOT NULL, **el COALESCE no
+    llega a actuar nunca**. El NOT NULL se comprueba sobre la fila propuesta
+    antes de resolver el conflicto, así que un título nulo revienta el INSERT
+    aunque la fila ya exista. Quien protege la caché es el descarte de
+    `filtrar_nuevas`; el COALESCE se queda como red por coherencia con el resto
+    de campos. Lo fija `test_el_upsert_rechaza_un_titulo_nulo`.
     """
     filas = [
         {
