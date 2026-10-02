@@ -49,7 +49,8 @@ El desarrollo completo está desglosado en `D:\Trabajo\BigToOne\Subvenciones\api
 - **Hito 4 — Ejecuciones fallidas de alerta visibles y con reintentos espaciados**: hecho. `registrar_fallo` en `app/services/deduplicacion_alertas.py`, columnas `alerta.fallos_consecutivos` y `alerta.proximo_reintento_at` (migración `a3f9d27c51b8`, escrita a mano), selección y reinicio en `app/services/motor_alertas.py`, reinicio en el `PATCH` de `app/services/alertas.py`. 255 tests verdes (11 nuevos), ruff y mypy limpios. Detalle en la sección del motor.
 - **Hito 4 — Motor de ejecución de alertas, tarea 3 de 3 (deduplicación y registro)**: hecho. Servicio en `app/services/deduplicacion_alertas.py`, migración `d8c5e0cf33c8` (`alerta_ejecucion_convocatoria.alerta_id` + `UNIQUE(alerta_id, convocatoria_id)`, y `estado_envio` admite `pendiente_envio`). **Queda pendiente el envío del aviso**, que es otra funcionalidad: las ejecuciones con novedades se quedan en `pendiente_envio`. 229 tests verdes (10 nuevos), ruff y mypy limpios.
 - **Hito 4 — Cobertura de integración del CRUD de alertas**: hecho, solo tests (`tests/test_alertas.py`, 11 nuevos; 170 verdes con el historial ya integrado). Cierran cuatro huecos sobre reglas ya documentadas: el DELETE arrastra `alerta_ejecucion` y su tabla intermedia pero conserva la convocatoria cacheada; los límites de campo (`nombre`, `texto_busqueda`, `nivel_administracion`, `canal_notificacion`, `MAX_FILTROS`) validados entrando por HTTP; el rol `usuario` gestiona sus propias alertas (los endpoints no exigen gestor) y no alcanza las de un compañero; y `usuario_id`/`id` en el body no reasignan el propietario ni al crear ni al editar.
-- Hito 4 (Alertas, 22 h), Hito 5 (Análisis con IA), Hito 6 (Ficha ampliada, sin cambios de backend), Hito 7 (Cierre): pendientes, ver el .docx para el desglose de tareas y horas de cada uno.
+- **Hito 5, Funcionalidad 1 — Análisis por convocatoria, tarea 1 de 4 (integración del Anthropic SDK)**: hecho. Cliente en `app/services/ia_cliente.py` (`ClienteIA`, errores `IANoConfigurada`/`IANoDisponible`/`IARespuestaInvalida`, `calcular_coste`, dependencia `ClienteIADep` en `app/api/deps.py`), configuración en `app/config.py`. 286 tests verdes (31 nuevos en `tests/test_ia_cliente.py`, con MockTransport), ruff y mypy limpios. **Sin probar contra Anthropic real**: no hay clave. Detalle en la sección "Análisis con IA".
+- Hito 4 (Alertas, 22 h), Hito 5 (Análisis con IA; resto de tareas), Hito 6 (Ficha ampliada, sin cambios de backend), Hito 7 (Cierre): pendientes, ver el .docx para el desglose de tareas y horas de cada uno.
 
 ## Flujo de ramas (decisión cerrada, desde el 22/09/2026)
 
@@ -253,3 +254,29 @@ Decisiones cerradas con el usuario:
 
 **Gotcha ya pagado**: añadir el `alerta_id` NOT NULL rompió dos tests anteriores que insertaban en la tabla puente sin él (`test_alerta_ejecuciones.py` y `test_alertas.py`). Si escribes en esa tabla, el `alerta_id` va siempre.
 
+
+## Análisis con IA (desde Hito 5, tarea 1 de 4)
+
+Decisiones cerradas con el usuario:
+
+- **Versiones fijadas, no se tocan**: `anthropic==0.42.0` y `ANTHROPIC_MODEL=claude-sonnet-5` los decidió el líder del proyecto. Hay versiones más nuevas (SDK 1.x, `claude-sonnet-5-5`), pero subirlas está pendiente de revisarlo con él. No las cambies por iniciativa propia, aunque una herramienta lo sugiera.
+- **El contenido de la convocatoria lo consulta el backend a la BDNS** (detalle en `GET /convocatorias?numConv={codigo}`), no lo manda el frontend: el análisis tiene que ser independiente y no manipulable desde el cliente. Esto se construye en H5.3.
+- **Límite diario de análisis por empresa: aplazado**. No lo implementes sin que se decida cifra y rol.
+
+Cómo está hecho el cliente (`app/services/ia_cliente.py`), y por qué:
+
+- **Envoltorio fino, sin dominio**: manda `sistema` + un mensaje de usuario y devuelve `RespuestaIA(texto, modelo, tokens_entrada, tokens_salida)`. El prompt es de H5.2 y la persistencia de H5.3. `modelo` es el que **contestó** según Anthropic, que es el que va a `analisis_ia.modelo_ia`.
+- **Tres errores, porque quien llama decide cosas distintas**: `IANoConfigurada` (sin clave, 401/403, o **404 = el modelo configurado no existe**: reintentar no sirve, hay que tocar el `.env`), `IANoDisponible` (timeout, red, 429, 5xx, 529: transitorio) e `IARespuestaInvalida` (vacía, cortada por `max_tokens`, o 400/413/422: fallo nuestro). Todos heredan de `ErrorIA` y llevan `status` y `request_id`.
+- **Sin clave no falla al construirse, sino al generar**: un endpoint que solo lee análisis guardados tiene que funcionar sin IA configurada.
+- **Una respuesta cortada por `max_tokens` es un error**, no un resultado parcial: el análisis espera un JSON completo.
+- **Reintentos los del SDK y pocos** (`ANTHROPIC_MAX_REINTENTOS=1`): hay un usuario esperando. Al revés que la BDNS, que no reintenta porque la consulta un proceso en segundo plano. No reimplementes el backoff: el SDK ya lo hace y respeta `retry-after`.
+- **El coste solo se calcula con los dos precios configurados** (`ANTHROPIC_PRECIO_ENTRADA_MILLON`/`_SALIDA_MILLON`, USD por millón de tokens, sin valor por defecto): un precio inventado daría un coste falso. Sin ellos, `coste_estimado` queda en NULL. Se redondea a 4 decimales, como `Numeric(10, 4)`.
+- **Dependencia**: `ClienteIADep` en `app/api/deps.py`, un cliente por petición. En los tests de endpoints se sustituye con `app.dependency_overrides[obtener_cliente_ia]`.
+
+**Gotcha de seguridad — no uses `str(exc)` de las excepciones del SDK**: el mensaje de `APIStatusError` **incluye el cuerpo de la respuesta de error**, y ese cuerpo puede hacer eco del prompt, que lleva el perfil de la empresa y la ficha de la convocatoria. Comprobado con el SDK 0.42.0. Por eso los errores propios tienen mensajes fijos, y en el log solo van status, `request_id`, modelo, tokens y duración. Lo fija `test_ni_clave_ni_prompt_salen_en_el_error_ni_en_el_log`, con un cuerpo de error simulado que repite el prompt.
+
+**Gotcha de configuración**: las variables de precio son `Decimal | None` y **una cadena vacía no es `None`**: `ANTHROPIC_PRECIO_ENTRADA_MILLON=` en el `.env` hace que la app no arranque (`ValidationError`). Por eso van comentadas en `.env.example`. Para no configurarlas, se quitan o se comentan, no se dejan vacías.
+
+**Gotcha de tests**: el cliente se prueba con un `AsyncAnthropic` real sobre `httpx.MockTransport` (`http_client=`), no mockeando el SDK: así se cubren de verdad la serialización, los códigos de error y los reintentos. Para el test de reintento, la respuesta 429 lleva `retry-after-ms` corto, o el backoff del SDK alarga el test. Los tests que no reintentan usan `max_retries=0`.
+
+**Pendiente para H5.3 y el Hito 7 — timeout de API Gateway**: API Gateway HTTP API corta a los **30 s**, y con `ANTHROPIC_TIMEOUT_SEGUNDOS=60` y un reintento una llamada puede acercarse a los dos minutos. En local no se nota. Antes de desplegar hay que decidir si el análisis es síncrono con un timeout menor o en segundo plano (el estado `procesando` de `analisis_ia` ya existe para eso).

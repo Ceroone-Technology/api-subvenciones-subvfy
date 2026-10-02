@@ -347,6 +347,32 @@ worker, y en Lambda + EventBridge el disparo es externo, así que el problema
 desaparece; si hiciera falta antes, se envolvería el ciclo en un
 `pg_try_advisory_lock`.
 
+### Análisis con IA (en construcción, Hito 5)
+
+Por ahora solo existe el **cliente de Anthropic** (`app/services/ia_cliente.py`);
+los prompts y los endpoints llegan en las tareas siguientes. El cliente manda un
+prompt, devuelve el texto con los tokens consumidos y traduce los fallos a tres
+errores propios: la IA **no está configurada** (sin clave, clave rechazada o
+modelo inexistente), **no está disponible** (timeout, red, 429, 5xx) o la
+**respuesta no vale** (vacía o cortada por el límite de tokens).
+
+Sin `ANTHROPIC_API_KEY` la API arranca igual: lo que falla, con un mensaje claro,
+es generar un análisis. Ni la clave ni el contenido del prompt salen nunca en
+los errores ni en el log.
+
+```bash
+ANTHROPIC_API_KEY=                 # vacía: la IA responde "no configurada"
+ANTHROPIC_MODEL=claude-sonnet-5
+ANTHROPIC_TIMEOUT_SEGUNDOS=60      # por intento
+ANTHROPIC_MAX_REINTENTOS=1         # del SDK, ante 429/5xx/red
+ANTHROPIC_MAX_TOKENS=2048
+# ANTHROPIC_PRECIO_ENTRADA_MILLON=   USD por millón de tokens; sin los dos
+# ANTHROPIC_PRECIO_SALIDA_MILLON=    precios, el coste estimado queda vacío
+```
+
+Las variables de precio van comentadas en `.env.example` a propósito: una
+variable de precio **vacía** no es válida y la app no arrancaría.
+
 ### Primer administrador
 
 Crear un usuario exige estar autenticado, y autenticarse exige que ya exista
@@ -389,7 +415,7 @@ app/
   models/          # modelos SQLAlchemy (uno por tabla de schema-subvfy.sql)
   schemas/         # schemas Pydantic de request/response
   api/routes/      # un router por recurso (rol, empresa, usuario, auth, ...)
-  services/        # lógica de negocio sin HTTP (alertas, motor de alertas, identidad de sistema)
+  services/        # lógica de negocio sin HTTP (alertas, motor de alertas, cliente de IA, identidad de sistema)
   core/            # seguridad (JWT/hash), permisos por rol, scheduler
   cli.py           # utilidades de consola (crear el primer admin)
 alembic/           # migraciones
@@ -405,6 +431,7 @@ El desarrollo se organiza como Hito → Funcionalidad → Tarea en `api-hitos-fu
 - Hito 2, Funcionalidad 3 — API de empresa/rol/usuario: **hecho** (schemas Pydantic + CRUD paginado + hashing de contraseñas).
 - Hito 2, Funcionalidad 4 — Autenticación real (JWT): **hecho** (login/refresh/logout/me, autorización por rol, aislamiento multi-tenant, 70 tests contra Postgres real).
 - Hito 3, Funcionalidad 1 — Endpoints de favoritos: **hecho** (marcar/quitar, listado con join a convocatoria, nota personal, 85 tests contra Postgres real).
+- Hito 5, Funcionalidad 1 — Análisis por convocatoria, tarea 1 (integración del SDK de Anthropic): **hecho** (cliente con errores propios, timeout y reintentos configurables, coste estimado; 286 tests, el cliente con MockTransport). Sin probar contra Anthropic real: no hay clave todavía. Pendientes los prompts, los endpoints y el score de idoneidad.
 - Hito 4 — Ejecuciones fallidas de alerta visibles y con reintentos espaciados: **hecho** (fila `error` en el historial, espera creciente de 15 min a 24 h, migración `a3f9d27c51b8`; 255 tests contra Postgres real).
 - Hito 4 — Motor de ejecución de alertas (tarea 3 de 3, deduplicación y registro): **hecho** (dedup por alerta con garantía de base de datos, registro transaccional del historial y migración `d8c5e0cf33c8`; 229 tests contra Postgres real). Pendiente el envío del aviso.
 - Hito 4 — Motor de ejecución de alertas (tarea 2 de 3, consulta a la BDNS): **hecho** (constructor puro de la consulta + cliente HTTP con topes y timeouts; 219 tests contra Postgres real, el cliente con MockTransport). Pendiente el registro del historial.
