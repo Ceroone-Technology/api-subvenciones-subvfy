@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permisos import AdminDep, GestorDep, UsuarioActualDep
 from app.database import get_db
+from app.services.ia_cliente import ClienteIA, obtener_cliente_ia
 
 
 @dataclass(frozen=True)
@@ -35,10 +36,12 @@ def paginacion(
 
 DbDep = Annotated[AsyncSession, Depends(get_db)]
 PaginacionDep = Annotated[Paginacion, Depends(paginacion)]
+ClienteIADep = Annotated[ClienteIA, Depends(obtener_cliente_ia)]
 
 
 __all__ = [
     "AdminDep",
+    "ClienteIADep",
     "DbDep",
     "GestorDep",
     "Paginacion",
