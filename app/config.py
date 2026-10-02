@@ -4,6 +4,7 @@ Un único objeto `settings`, importado donde haga falta. Nada de valores
 mágicos repartidos por el código: todo lo configurable vive aquí.
 """
 
+from decimal import Decimal
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,9 +28,22 @@ class Settings(BaseSettings):
     # límite real de exposición si se roba: no lo subas sin pensarlo.
     refresh_token_expire_days: int = 30
 
-    # IA (Análisis + Asistente) — Anthropic
+    # IA (Análisis + Asistente) — Anthropic. Sin clave, el cliente lo dice
+    # antes de llamar a nada (`IANoConfigurada`): la app arranca igual.
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-5"
+    # Por intento: con un reintento, la espera máxima es el doble. Ojo en el
+    # Hito 7: API Gateway HTTP API corta a los 30 s.
+    anthropic_timeout_segundos: float = 60.0
+    # Reintentos del propio SDK (429, 5xx, red), con backoff. Pocos a
+    # propósito: hay un usuario esperando la respuesta.
+    anthropic_max_reintentos: int = 1
+    anthropic_max_tokens: int = 2048
+    # Precio en USD por millón de tokens, para `analisis_ia.coste_estimado`.
+    # Sin valor por defecto: un precio inventado daría un coste falso. Sin
+    # configurar, el coste queda en NULL.
+    anthropic_precio_entrada_millon: Decimal | None = None
+    anthropic_precio_salida_millon: Decimal | None = None
 
     # BDNS (fuente de verdad de las convocatorias). Solo lectura, sin clave:
     # la API es pública. Sin rate limit documentado, de ahí los topes.
