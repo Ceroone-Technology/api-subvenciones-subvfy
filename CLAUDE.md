@@ -259,10 +259,13 @@ Decisiones cerradas con el usuario — no las reabras sin preguntar:
 
 Cuatro invariantes que sostienen los tests y conviene no romper:
 
-- **`pendiente_envio` es la cola.** `enviar_aviso` ignora cualquier ejecución en otro estado, así que llamarla dos veces sobre la misma no manda dos correos. Es lo que la hace segura de reintentar (`test_avisar_dos_veces_no_manda_dos_correos`).
-- **Un fallo del proveedor no se propaga**: se cierra en `estado_envio = "error"` con el detalle. Si se relanzara, un SES caído tumbaría la pasada entera de alertas — `evaluar_alerta` llama a `enviar_aviso` dentro del ciclo.
-- **Un fallo de envío no provoca un re-aviso.** Las convocatorias ya las registró el motor antes de intentar el envío, así que siguen contando como notificadas: el precio de un fallo es ese aviso concreto, no un duplicado en el ciclo siguiente (`test_un_fallo_de_envio_no_hace_que_se_re_avise`). Si algún día se quiere reintentar, el sitio es el motor, no este servicio.
-- **Una cuenta no activa cuenta como `error`, no como silencio.** Si alguien deja de recibir avisos por estar bloqueado, tiene que verse en el historial de la alerta.
+- **`pendiente_envio` es la cola.** `enviar_aviso` ignora cualquier ejecución en otro estado, así que llamarla dos veces sobre una ya enviada no manda un segundo correo (`test_avisar_dos_veces_no_manda_dos_correos`).
+- **Un fallo de envío no se propaga y tampoco cierra la ejecución**: se queda en `pendiente_envio` con el motivo en `detalle_error`. No se relanza porque `evaluar_alerta` llama a `enviar_aviso` dentro del ciclo y un SES caído tumbaría la pasada entera.
+- **`error` no lo escribe el envío, y esto es una decisión, no un descuido** (`test_el_estado_error_no_lo_escribe_el_envio`). Ese estado significa una sola cosa: la ejecución no llegó a término, y lo pone el motor. Usarlo también para "se ejecutó bien pero el correo no salió" daría dos significados opuestos a la misma columna: en el primer caso las convocatorias **no** se registraron y volverán a encontrarse; en el segundo **sí**, y no se volverían a anunciar nunca. Una ejecución en `pendiente_envio` con `detalle_error` nulo es que aún no se ha intentado; con texto, que se intentó y falló, y `updated_at` dice cuándo.
+- **Un fallo de envío no provoca un re-aviso duplicado.** Las convocatorias ya las registró el motor antes de intentarlo, así que no reaparecen como novedad en el ciclo siguiente (`test_un_fallo_de_envio_no_hace_que_se_re_avise`). Lo que sí puede ocurrir es reintentar **esa misma ejecución**, que sigue en la cola (`test_un_aviso_fallido_puede_reintentarse`).
+- **Una cuenta no activa deja el aviso en la cola, no en silencio.** Si alguien deja de recibir avisos por estar bloqueado tiene que verse en el historial, y el aviso debe poder salir cuando se reactive.
+
+**Pendiente, y es trabajo aparte**: **nadie barre la cola**. El ciclo llama a `enviar_aviso` con la ejecución que acaba de crear, no con las `pendiente_envio` atrasadas, así que un aviso fallido queda visible pero no se reenvía solo. El modelo de datos ya lo soporta; falta el mecanismo, y el sitio natural es el motor, junto al escalado de reintentos que introduce el PR #7.
 
 **`enviar()` es síncrono a propósito** (boto3 bloquea y no tiene versión async); el servicio lo saca del event loop con `asyncio.to_thread`. No lo envuelvas en una corrutina falsa.
 

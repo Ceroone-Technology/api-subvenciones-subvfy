@@ -4,7 +4,7 @@
 convocatorias son novedad es el motor (`registrar_ejecucion`, en
 `app.services.deduplicacion_alertas`), que la deja en `pendiente_envio`
 cuando hay algo que contar. Aquí se recoge ese testigo: se manda el correo y
-se cierra la ejecución en `enviado` o en `error`.
+se cierra la ejecución en `enviado`.
 
 Hacerlo así, y no registrando por nuestra cuenta, es lo que mantiene una
 sola fuente de verdad: la deduplicación entre ejecuciones, el `UNIQUE` que
@@ -13,14 +13,33 @@ se duplican aquí.
 
 **`pendiente_envio` es la cola.** Una ejecución en ese estado es un aviso que
 debe salir; cualquier otro estado ya está resuelto y esta función lo ignora.
-Eso la hace segura de reintentar: llamarla dos veces sobre la misma ejecución
-no manda dos correos.
+Eso la hace segura de reintentar: llamarla dos veces sobre una ejecución ya
+enviada no manda un segundo correo.
 
-**Un fallo del proveedor no se propaga.** Se cierra la ejecución en `error`
-con el detalle y se devuelve. Si se relanzara, un SES caído tumbaría la
-pasada entera de alertas. Las convocatorias ya quedaron registradas por el
-motor, así que no se re-avisará de ellas: el precio de un fallo de envío es
-ese aviso concreto, no un duplicado más adelante.
+**Un fallo de envío no cierra la ejecución: la deja en la cola.** No se
+propaga la excepción (un SES caído tumbaría la pasada entera de alertas),
+pero tampoco se marca `error`: la ejecución se queda en `pendiente_envio`
+con el motivo apuntado en `detalle_error`, así que el aviso sigue debiendo
+salir y un reintento puede recogerlo.
+
+Esto es deliberado y vale la pena entenderlo, porque **`error` no es nuestro**.
+Ese estado significa una sola cosa: la ejecución no llegó a término (la BDNS
+no respondió, la base de datos rechazó el lote). Lo escribe el motor. Si
+además lo usáramos para "se ejecutó bien pero el correo no salió", la misma
+columna tendría dos significados opuestos: en el primero las convocatorias no
+se registraron y volverán a encontrarse, y en el segundo sí se registraron y
+no se volverán a anunciar nunca.
+
+Cómo se lee entonces una ejecución en `pendiente_envio`:
+
+- `detalle_error` nulo — todavía no se ha intentado enviar.
+- `detalle_error` con texto — se intentó y falló; ahí está el motivo y
+  `updated_at` dice cuándo fue el último intento.
+
+**Hoy nadie barre esa cola.** El ciclo del motor llama a `enviar_aviso` con la
+ejecución que acaba de crear, no con las pendientes de pasadas anteriores, así
+que un aviso fallido queda visible en el historial pero no se reenvía solo. El
+barrido es trabajo aparte, y este módulo ya deja el dato preparado para él.
 """
 
 import asyncio
@@ -41,7 +60,8 @@ logger = logging.getLogger(__name__)
 ESTADO_PENDIENTE = "pendiente_envio"
 ESTADO_ENVIADO = "enviado"
 ESTADO_SIN_NOVEDADES = "sin_novedades"
-ESTADO_ERROR = "error"
+# `error` existe en el CHECK de la tabla, pero no se escribe desde aquí: es del
+# motor, para las ejecuciones que no llegaron a término. Ver la cabecera.
 
 # Canales de `alerta.canal_notificacion` que implican mandar un correo.
 CANALES_CON_EMAIL = ("email", "ambos")
@@ -65,13 +85,17 @@ async def enviar_aviso(
     *,
     enviador: EnviadorEmail | None = None,
 ) -> ResultadoNotificacion:
-    """Manda el aviso de una ejecución pendiente y la cierra.
+    """Manda el aviso de una ejecución pendiente y, si sale, la cierra.
+
+    Si no sale, la ejecución **sigue en `pendiente_envio`** con el motivo en
+    `detalle_error`: el aviso continúa debiendo salir. Ver la cabecera del
+    módulo sobre por qué no se marca `error`.
 
     `enviador` se inyecta en los tests; en producción se resuelve desde
     `EMAIL_BACKEND`.
     """
     if ejecucion.estado_envio != ESTADO_PENDIENTE:
-        # Nada que hacer: o no hubo novedades, o este aviso ya se resolvió.
+        # Nada que hacer: o no hubo novedades, o este aviso ya salió.
         return ResultadoNotificacion(
             ejecucion_id=ejecucion.id,
             estado_envio=ejecucion.estado_envio,
@@ -81,7 +105,9 @@ async def enviar_aviso(
 
     detalle_error = await _intentar_aviso(db, ejecucion, enviador)
 
-    ejecucion.estado_envio = ESTADO_ERROR if detalle_error else ESTADO_ENVIADO
+    if detalle_error is None:
+        ejecucion.estado_envio = ESTADO_ENVIADO
+    # En el camino bueno esto limpia el detalle de un intento anterior fallido.
     ejecucion.detalle_error = detalle_error
     ejecucion.updated_by = await id_usuario_sistema(db)
     await db.commit()

@@ -358,9 +358,14 @@ entorno manda correo real sin pedirlo explícitamente.
 Estados que registra `alerta_ejecucion.estado_envio`:
 
 - `sin_novedades` — la alerta se evaluó y no había nada nuevo. No se envía correo.
-- `pendiente_envio` — hay novedades registradas y el aviso todavía no ha salido. Es el estado intermedio que deja el motor; el envío lo cierra en `enviado` o `error`.
+- `pendiente_envio` — hay novedades registradas y el aviso todavía no ha salido. Lo deja el motor, y el envío lo cierra en `enviado` cuando el correo sale. Si el envío falla, **se queda aquí** con el motivo en `detalle_error`: el aviso sigue debiendo salir.
 - `enviado` — aviso entregado al proveedor (o canal `plataforma`, donde la propia ejecución es el aviso).
-- `error` — había novedades pero no se pudo avisar. El motivo queda en `detalle_error`.
+- `error` — la ejecución no llegó a término: la BDNS no respondió, o la base de datos rechazó el lote. El motivo queda en `detalle_error`.
+
+`error` y un `pendiente_envio` fallido no son lo mismo, y conviene no confundirlos al
+pintar el historial: con `error` las convocatorias **no** se registraron y volverán a
+encontrarse en la siguiente pasada; con un envío fallido **sí** se registraron, así que
+no reaparecerán como novedad y lo que falta es que salga el correo.
 
 El reparto es deliberado: el motor registra la ejecución y decide qué es novedad;
 el envío solo consume las que están en `pendiente_envio` y las cierra. Por eso

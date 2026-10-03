@@ -22,7 +22,7 @@ from app.services.deduplicacion_alertas import registrar_ejecucion
 from app.services.email import ErrorDeEnvio
 from app.services.notificaciones import (
     ESTADO_ENVIADO,
-    ESTADO_ERROR,
+    ESTADO_PENDIENTE,
     ESTADO_SIN_NOVEDADES,
     enviar_aviso,
 )
@@ -223,9 +223,10 @@ async def test_no_se_avisa_a_una_cuenta_bloqueada(empresa: dict) -> None:
     resultado = await _avisar(ejecucion_id, enviador)
 
     assert enviador.correos == []
-    # Queda como error y no en silencio: si alguien deja de recibir avisos
-    # durante semanas, tiene que verse en el historial de la alerta.
-    assert resultado.estado_envio == ESTADO_ERROR
+    # Sigue en la cola, no cerrada en error, y con el motivo a la vista: si
+    # alguien deja de recibir avisos durante semanas, tiene que verse en el
+    # historial de la alerta, y el aviso debe poder salir cuando se reactive.
+    assert resultado.estado_envio == ESTADO_PENDIENTE
     assert resultado.detalle_error is not None and "bloqueado" in resultado.detalle_error
 
 
@@ -233,24 +234,56 @@ async def test_no_se_avisa_a_una_cuenta_bloqueada(empresa: dict) -> None:
 
 
 @pytest.mark.asyncio
-async def test_un_fallo_de_ses_no_propaga_y_queda_registrado(gestor: Sesion) -> None:
-    """Un proveedor caído no puede tumbar la pasada de alertas ni borrar el
-    rastro de que la alerta se evaluó."""
+async def test_un_fallo_de_ses_no_propaga_y_deja_el_aviso_en_cola(gestor: Sesion) -> None:
+    """Un proveedor caído no puede tumbar la pasada de alertas. Y como el aviso
+    sigue debiendo salir, la ejecución no se cierra: se queda en la cola."""
     alerta_id = await crear_alerta_en_bd(gestor.id)
     ejecucion_id = await _ejecutar(alerta_id, [_de_la_bdns()])
     enviador = EnviadorDePrueba(fallo=ErrorDeEnvio("SES no disponible"))
 
     resultado = await _avisar(ejecucion_id, enviador)
 
-    assert resultado.estado_envio == ESTADO_ERROR
+    assert resultado.estado_envio == ESTADO_PENDIENTE
     assert resultado.detalle_error is not None
     assert "SES no disponible" in resultado.detalle_error
 
     async with AsyncSessionLocal() as db:
         ejecucion = await db.get(AlertaEjecucion, ejecucion_id)
         assert ejecucion is not None
-        assert ejecucion.estado_envio == ESTADO_ERROR
+        assert ejecucion.estado_envio == ESTADO_PENDIENTE
         assert ejecucion.convocatorias_encontradas == 1
+
+
+@pytest.mark.asyncio
+async def test_el_estado_error_no_lo_escribe_el_envio(gestor: Sesion) -> None:
+    """`error` significa una sola cosa: la ejecución no llegó a término, y eso
+    lo decide el motor. Un fallo de envío nunca lo escribe, porque las
+    convocatorias sí quedaron registradas y la consecuencia es la contraria."""
+    alerta_id = await crear_alerta_en_bd(gestor.id)
+    ejecucion_id = await _ejecutar(alerta_id, [_de_la_bdns()])
+
+    resultado = await _avisar(ejecucion_id, EnviadorDePrueba(fallo=ErrorDeEnvio("caído")))
+
+    assert resultado.estado_envio != "error"
+
+
+@pytest.mark.asyncio
+async def test_un_aviso_fallido_puede_reintentarse(gestor: Sesion) -> None:
+    """Al quedarse en `pendiente_envio`, un segundo intento lo recoge. Hoy
+    nadie barre esa cola, pero el dato ya lo permite."""
+    alerta_id = await crear_alerta_en_bd(gestor.id)
+    ejecucion_id = await _ejecutar(alerta_id, [_de_la_bdns("Kit Digital")])
+
+    await _avisar(ejecucion_id, EnviadorDePrueba(fallo=ErrorDeEnvio("SES no disponible")))
+
+    segundo = EnviadorDePrueba()
+    resultado = await _avisar(ejecucion_id, segundo)
+
+    assert resultado.estado_envio == ESTADO_ENVIADO
+    assert len(segundo.correos) == 1
+    assert "Kit Digital" in segundo.correos[0].html
+    # El detalle del intento fallido se limpia al salir bien.
+    assert resultado.detalle_error is None
 
 
 @pytest.mark.asyncio
