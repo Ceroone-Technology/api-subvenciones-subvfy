@@ -32,7 +32,7 @@ from app.services.analisis_ia import (
 )
 from app.services.ia_cliente import ClienteIA, IANoDisponible, IARespuestaInvalida
 from app.services.ia_entrada import DATO_ACTIVIDAD, DATO_CCAA, PERSONA_JURIDICA, PerfilEmpresa
-from app.services.ia_prompts import VERSIONES_PROMPT
+from app.services.ia_prompts import MAX_TOKENS_ANALISIS, VERSIONES_PROMPT
 from tests.conftest import ficha_bdns
 
 HOY = date(2026, 10, 4)
@@ -295,3 +295,23 @@ async def test_un_error_que_no_es_de_la_ia_se_propaga(monkeypatch: pytest.Monkey
     async with SimuladorAnthropic().cliente() as cliente:
         with pytest.raises(KeyError):
             await analizar_convocatoria(cliente, FICHA, hoy=HOY)
+
+
+async def test_cada_llamada_pide_el_tope_de_tokens_del_analisis() -> None:
+    simulador = SimuladorAnthropic()
+
+    async with simulador.cliente() as cliente:
+        await analizar_convocatoria(cliente, FICHA, PERFIL, hoy=HOY)
+
+    assert {cuerpo["max_tokens"] for cuerpo in simulador.cuerpos.values()} == {MAX_TOKENS_ANALISIS}
+
+
+async def test_una_lista_con_textos_vacios_no_tumba_la_respuesta_pagada() -> None:
+    simulador = SimuladorAnthropic(
+        datos={"registrar_requisitos_clave": {**RESPUESTAS["registrar_requisitos_clave"], "cuantia": [""]}}
+    )
+
+    async with simulador.cliente() as cliente:
+        analisis = await analizar_requisitos(cliente, FICHA)
+
+    assert analisis.resultado.cuantia == []

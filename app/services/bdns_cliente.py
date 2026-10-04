@@ -27,14 +27,24 @@ from typing import Any, Self
 import httpx
 
 from app.config import settings
+from app.models.convocatoria import Convocatoria
 from app.services.bdns_consulta import ConsultaBdns
 
 logger = logging.getLogger(__name__)
 
 RUTA_BUSQUEDA = "/convocatorias/busqueda"
 RUTA_DETALLE = "/convocatorias"
-# El tamaño de `convocatoria.codigo_bdns`.
-MAX_LONGITUD_CODIGO = 30
+# Se lee del modelo, como en `deduplicacion_alertas._limite` (que no se importa
+# porque ese módulo ya importa este): si cambia la columna, cambia con ella y no
+# hay dos verdades.
+def _longitud_codigo() -> int:
+    longitud = getattr(Convocatoria.__table__.c.codigo_bdns.type, "length", None)
+    if longitud is None:  # pragma: no cover - solo si alguien quita el String(n)
+        raise RuntimeError("convocatoria.codigo_bdns ha dejado de tener longitud máxima.")
+    return int(longitud)
+
+
+MAX_LONGITUD_CODIGO = _longitud_codigo()
 
 
 class BdnsNoDisponible(RuntimeError):
@@ -182,12 +192,14 @@ class ClienteBdns:
 
         Un código que no existe no es un error de la BDNS: contesta 204 sin
         cuerpo, y aquí sale como `ConvocatoriaNoEncontrada`. El código se
-        valida antes de llamar porque, vacío, el cortafuegos de la BDNS no
-        contesta con un error sino con una página HTML de "Acceso denegado".
+        valida antes de llamar (solo dígitos, como todos los de la BDNS):
+        con algunos valores, el cortafuegos de la BDNS no contesta con un
+        error sino con una página HTML de "Acceso denegado", y la BDNS avisa
+        de que puede restringir el acceso ante un uso abusivo.
         """
         codigo = codigo.strip()
-        if not codigo or len(codigo) > MAX_LONGITUD_CODIGO:
-            raise ValueError(f"El código BDNS debe tener entre 1 y {MAX_LONGITUD_CODIGO} caracteres.")
+        if not (codigo.isascii() and codigo.isdigit()) or len(codigo) > MAX_LONGITUD_CODIGO:
+            raise ValueError(f"El código BDNS debe tener entre 1 y {MAX_LONGITUD_CODIGO} dígitos.")
 
         respuesta = await self._pedir(RUTA_DETALLE, (("numConv", codigo),))
         if respuesta.status_code == httpx.codes.NO_CONTENT or not respuesta.content.strip():
@@ -283,6 +295,9 @@ def _leer_detalle(cuerpo: Any) -> DetalleConvocatoriaBdns:
     organo = cuerpo.get("organo")
     if not isinstance(organo, dict):
         organo = {}
+    documentos = cuerpo.get("documentos")
+    if not isinstance(documentos, list):
+        documentos = []
     reglamento = cuerpo.get("reglamento")
     return DetalleConvocatoriaBdns(
         id_bdns=id_bdns,
@@ -318,7 +333,7 @@ def _leer_detalle(cuerpo: Any) -> DetalleConvocatoriaBdns:
                 descripcion=_texto_limpio(documento.get("descripcion")),
                 nombre_fichero=_texto_limpio(documento.get("nombreFic")),
             )
-            for documento in cuerpo.get("documentos") or []
+            for documento in documentos
             if isinstance(documento, dict)
         ),
     )

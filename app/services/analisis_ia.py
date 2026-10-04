@@ -151,6 +151,7 @@ async def _pedir(cliente: ClienteIA, peticion: PeticionIA[FormatoT]) -> Respuest
         herramienta=peticion.herramienta,
         descripcion=peticion.descripcion_herramienta,
         formato=peticion.formato,
+        max_tokens=peticion.max_tokens,
     )
 
 

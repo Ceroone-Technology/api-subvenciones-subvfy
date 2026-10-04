@@ -28,7 +28,10 @@ cosas distintas con cada una:
 
 **Ni la clave ni el prompt salen nunca en un mensaje de error ni en el log.**
 Por eso no se usa `str(exc)` del SDK: el prompt lleva el perfil de la empresa
-y la ficha de la convocatoria. Solo se registran modelo, tokens, duración y,
+y la ficha de la convocatoria. Tampoco se encadena la excepción del SDK
+cuando su texto puede llevar el cuerpo de la respuesta (errores HTTP) o lo que
+contestó la IA (validación): una traza completa (`logger.exception`, el
+manejador de errores de FastAPI) imprimiría la causa entera. Solo se registran modelo, tokens, duración y,
 en los fallos, el status HTTP y el `request_id` (lo que pide el soporte de
 Anthropic para investigar una llamada).
 
@@ -180,6 +183,13 @@ class ClienteIA:
             ],
             eleccion_herramienta={"type": "tool", "name": herramienta},
         )
+        if respuesta.stop_reason != "tool_use":
+            # Con la herramienta obligatoria, una respuesta completa termina en
+            # `tool_use`. Cualquier otro motivo (una negativa del modelo, por
+            # ejemplo) puede dejar los datos a medias, y como las listas tienen
+            # valor por defecto, unos datos a medias podrían pasar la validación.
+            logger.warning("Anthropic: la respuesta estructurada terminó con stop_reason=%s.", respuesta.stop_reason)
+            raise IARespuestaInvalida("La IA no terminó la respuesta con el formato esperado.")
         entrada = next(
             (
                 bloque.input
@@ -201,9 +211,12 @@ class ClienteIA:
                 f"{'.'.join(map(str, error['loc'])) or '(raíz)'}: {error['type']}" for error in exc.errors()
             )
             logger.warning("Anthropic: la respuesta no cumple %s (%s).", formato.__name__, errores)
-            # `from None` por lo mismo: el mensaje de un ValidationError incluye
-            # los valores recibidos, y encadenado acabaría en cualquier traza.
-            raise IARespuestaInvalida("La respuesta de la IA no cumple el formato esperado.") from None
+            datos = None
+        if datos is None:
+            # Se lanza fuera del `except` a propósito: dentro, el ValidationError
+            # (que lleva los valores recibidos) quedaría enganchado como
+            # contexto, y `from None` solo lo oculta de la traza, no lo suelta.
+            raise IARespuestaInvalida("La respuesta de la IA no cumple el formato esperado.")
 
         return RespuestaEstructurada(
             datos=datos,
@@ -226,6 +239,7 @@ class ClienteIA:
             raise IANoConfigurada("La IA no está configurada: falta ANTHROPIC_API_KEY.")
 
         inicio = time.monotonic()
+        error: ErrorIA | None = None
         try:
             respuesta = await self._cliente.messages.create(
                 model=settings.anthropic_model,
@@ -236,7 +250,9 @@ class ClienteIA:
                 tool_choice=eleccion_herramienta,
             )
         except anthropic.APIStatusError as exc:
-            raise _traducir_status(exc) from exc
+            # Sin encadenar (se lanza fuera del `except`): el texto de `exc`
+            # incluye el cuerpo de la respuesta, que puede repetir el prompt.
+            error = _traducir_status(exc)
         except anthropic.APITimeoutError as exc:
             # Va antes que APIConnectionError porque hereda de ella.
             logger.warning("Anthropic: timeout tras %.1f s.", time.monotonic() - inicio)
@@ -244,6 +260,23 @@ class ClienteIA:
         except anthropic.APIConnectionError as exc:
             logger.warning("Anthropic: error de conexión (%s).", type(exc).__name__)
             raise IANoDisponible("No se pudo conectar con Anthropic.") from exc
+        except anthropic.APIResponseValidationError:
+            logger.warning("Anthropic: la respuesta no tiene la forma que espera el SDK.")
+            error = IARespuestaInvalida("Anthropic devolvió una respuesta que no se puede leer.")
+        except anthropic.APIError as exc:
+            # Cualquier otro error del SDK: para quien llama es transitorio.
+            logger.warning("Anthropic: error del SDK (%s).", type(exc).__name__)
+            error = IANoDisponible("Anthropic no está disponible ahora.")
+        if error is not None:
+            raise error
+
+        if not isinstance(respuesta, Message):
+            # Pasa si algo entre medias (un proxy, un antivirus que inspecciona
+            # HTTPS) contesta 200 con una página HTML: el SDK devuelve el texto
+            # en vez de un mensaje. Sin esto, saldría un AttributeError y el
+            # análisis en paralelo perdería las llamadas ya pagadas.
+            logger.warning("Anthropic: respuesta inesperada (%s), ¿un proxy intermedio?", type(respuesta).__name__)
+            raise IANoDisponible("Anthropic devolvió una respuesta inesperada.")
 
         duracion = time.monotonic() - inicio
         logger.info(
@@ -258,9 +291,7 @@ class ClienteIA:
         if respuesta.stop_reason == "max_tokens":
             # Una respuesta cortada no es "casi buena": ni el texto ni los
             # datos de la herramienta estarían completos.
-            raise IARespuestaInvalida(
-                "La respuesta de la IA se cortó por el límite de tokens (ANTHROPIC_MAX_TOKENS)."
-            )
+            raise IARespuestaInvalida("La respuesta de la IA se cortó por el límite de tokens de respuesta.")
         return respuesta
 
 

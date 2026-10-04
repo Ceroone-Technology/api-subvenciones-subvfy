@@ -277,6 +277,18 @@ async def test_ni_clave_ni_prompt_salen_en_el_error_ni_en_el_log(
         assert SISTEMA not in texto
 
 
+@pytest.mark.parametrize("status", [400, 401, 429, 529])
+async def test_el_error_http_del_sdk_no_queda_encadenado(status: int) -> None:
+    """El texto del error del SDK lleva el cuerpo de la respuesta, que puede
+    repetir el prompt: una traza completa lo imprimiría si quedara como causa."""
+    with pytest.raises(Exception) as error:
+        await _generar(_cliente(lambda peticion: _error(status)))
+
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert error.value.status == status
+
+
 async def test_el_log_de_exito_no_lleva_el_prompt_ni_la_respuesta(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.DEBUG, logger="app.services.ia_cliente")
 
@@ -430,9 +442,10 @@ async def test_estructurado_que_no_cumple_el_formato_es_invalido_sin_filtrar_val
     with pytest.raises(IARespuestaInvalida, match="no cumple el formato") as error:
         await _generar_estructurado(_cliente(lambda peticion: httpx.Response(200, json=_mensaje_herramienta(datos))))
 
-    # Ni en el mensaje ni encadenado: el ValidationError lleva los valores.
+    # Ni en el mensaje ni encadenado, ni siquiera como contexto oculto: el
+    # ValidationError lleva los valores.
     assert error.value.__cause__ is None
-    assert error.value.__suppress_context__ is True
+    assert error.value.__context__ is None
     mensajes = " ".join(registro.getMessage() for registro in caplog.records)
     assert "TEST-CONFIDENCIAL" not in str(error.value)
     assert "TEST-CONFIDENCIAL" not in mensajes
@@ -487,3 +500,34 @@ async def test_estructurado_traduce_los_errores_igual_y_sin_eco_del_prompt(
     for texto in [str(error.value), *(registro.getMessage() for registro in caplog.records)]:
         assert "TEST-CONFIDENCIAL" not in texto
         assert CLAVE_FALSA not in texto
+
+
+async def test_estructurado_que_no_termina_en_la_herramienta_es_invalido() -> None:
+    """Con la herramienta obligatoria, una respuesta completa termina en
+    `tool_use`; otro motivo (una negativa, por ejemplo) puede dejar los datos a
+    medias aunque pasen la validación."""
+
+    def manejador(peticion: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_mensaje_herramienta(DATOS_VALIDOS, stop_reason="refusal"))
+
+    with pytest.raises(IARespuestaInvalida, match="formato esperado"):
+        await _generar_estructurado(_cliente(manejador))
+
+
+# --- Respuestas que no son de Anthropic (un proxy intermedio) ---------------
+
+
+def _pagina_de_proxy(peticion: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, text="<html>Bloqueado por el proxy</html>", headers={"content-type": "text/html"})
+
+
+async def test_una_pagina_html_de_un_proxy_es_no_disponible() -> None:
+    """Comprobado con el SDK 0.42.0: devuelve el texto en vez de un mensaje, y
+    sin esta comprobación saldría un AttributeError."""
+    with pytest.raises(IANoDisponible, match="inesperada"):
+        await _generar(_cliente(_pagina_de_proxy))
+
+
+async def test_una_pagina_html_de_un_proxy_es_no_disponible_tambien_en_estructurado() -> None:
+    with pytest.raises(IANoDisponible, match="inesperada"):
+        await _generar_estructurado(_cliente(_pagina_de_proxy))

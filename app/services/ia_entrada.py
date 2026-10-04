@@ -19,7 +19,9 @@ manda a la IA. Tres reglas que no son accidentales:
 - **Datos, no instrucciones.** El texto va entre etiquetas (`<convocatoria>`,
   `<perfil_empresa>`) y el prompt dice que lo de dentro son datos. Por eso se
   cambian los `<` y `>` del texto externo: así nadie puede cerrar una
-  etiqueta desde la descripción de la empresa o de la convocatoria.
+  etiqueta desde la descripción de la empresa o de la convocatoria. También
+  los caracteres que se les parecen (`＜`, `〈`...), que un modelo podría leer
+  igual.
 """
 
 import re
@@ -62,7 +64,11 @@ _NIF_PERSONA_FISICA = re.compile(r"[XYZKLM]\d{7}[A-Z]")
 # de subvenciones sin tener personalidad jurídica (art. 11.3 de la Ley
 # General de Subvenciones), así que no se las mete con las sociedades.
 _NIF_SIN_PERSONALIDAD = re.compile(r"[EHU]\d{7}[0-9A-J]")
-_NIF_PERSONA_JURIDICA = re.compile(r"[ABCDFGJNPQRSVW]\d{7}[0-9A-J]")
+# La J (sociedades civiles) no está en ninguno de los dos y sale como "no
+# consta": una sociedad civil puede tener personalidad jurídica o no (art. 1669
+# del Código Civil), y la letra no lo dice. Decidido por Selena el 2026-10-04,
+# pendiente de comentarlo con el líder.
+_NIF_PERSONA_JURIDICA = re.compile(r"[ABCDFGNPQRSVW]\d{7}[0-9A-J]")
 
 TAMANOS = {
     "micro": "microempresa",
@@ -82,8 +88,8 @@ DATO_ACTIVIDAD = "actividad (descripción o palabras clave)"
 def tipo_persona(nif: str | None) -> str:
     """Persona física, jurídica o entidad sin personalidad, según la forma del NIF.
 
-    Con un NIF extranjero, mal formado o vacío, "no consta": mejor no saberlo
-    que adivinarlo.
+    Con un NIF extranjero, mal formado o vacío, o de una sociedad civil (J),
+    "no consta": mejor no saberlo que adivinarlo.
     """
     if not nif:
         return NO_CONSTA
@@ -238,11 +244,15 @@ def _lista(etiqueta: str, valores: Iterable[str], *, maximo: int = MAX_ELEMENTOS
     return "\n".join([f"{etiqueta}:", *lineas])
 
 
+# `<`, `>` y los caracteres que se les parecen → `‹`, `›`.
+_SIN_ETIQUETAS = str.maketrans({**dict.fromkeys("<＜﹤〈⟨⧼", "‹"), **dict.fromkeys(">＞﹥〉⟩⧽", "›")})
+
+
 def _limpio(valor: str | None) -> str | None:
-    """Sin espacios sobrantes y sin `<`/`>`, que podrían cerrar una etiqueta."""
+    """Sin espacios sobrantes y sin nada que pueda cerrar una etiqueta."""
     if valor is None:
         return None
-    texto = " ".join(str(valor).split()).replace("<", "‹").replace(">", "›")
+    texto = " ".join(str(valor).split()).translate(_SIN_ETIQUETAS)
     return texto or None
 
 

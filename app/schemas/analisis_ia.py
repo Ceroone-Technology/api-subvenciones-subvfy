@@ -16,7 +16,9 @@ Dos familias, y la diferencia importa:
 Los topes de tamaño son de seguridad (que una respuesta desbocada no llegue a
 la base de datos ni al frontend), no de estilo: la brevedad se pide en las
 descripciones. Por eso son holgados, porque una respuesta que se pasa de un
-tope se rechaza, y esa llamada ya se ha pagado.
+tope se rechaza, y esa llamada ya se ha pagado. Por lo mismo, los elementos
+vacíos de las listas (`[""]` en vez de `[]`) se quitan antes de validar en vez
+de tumbar la respuesta entera.
 
 El tipo `riesgos` de `TIPOS_ANALISIS` no tiene formato: existe en la base de
 datos, pero no se genera (decisión 6 de H5.2-D, ver S9).
@@ -24,7 +26,7 @@ datos, pero no se genera (decisión 6 de H5.2-D, ver S9).
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 ENCAJES = ("alto", "medio", "bajo", "no_encaja")
 # Literal[tupla] funciona en runtime pero mypy no lo acepta (ver CLAUDE.md): de ahí el ignore.
@@ -42,7 +44,18 @@ def _frases(descripcion: str, *, maximo: int = 10) -> Any:
 # --- Lo que rellena la IA ---------------------------------------------------
 
 
-class RespuestaResumen(BaseModel):
+class _FormatoIA(BaseModel):
+    @field_validator("*", mode="before")
+    @classmethod
+    def _sin_frases_vacias(cls, valor: Any) -> Any:
+        """Quita los textos vacíos de las listas: una respuesta ya pagada no se
+        tira porque la IA escribiera `[""]` para decir "nada"."""
+        if isinstance(valor, list):
+            return [item for item in valor if not (isinstance(item, str) and not item.strip())]
+        return valor
+
+
+class RespuestaResumen(_FormatoIA):
     resumen: str = Field(
         min_length=1,
         max_length=1500,
@@ -59,7 +72,7 @@ class RespuestaResumen(BaseModel):
     )
 
 
-class RespuestaRequisitos(BaseModel):
+class RespuestaRequisitos(_FormatoIA):
     beneficiarios: list[Frase] = _frases("Quién puede solicitarla y en qué condiciones, según la ficha.")
     ambito_territorial: list[Frase] = _frases("Dónde tiene que estar o actuar el beneficiario.")
     sectores: list[Frase] = _frases("Sectores o actividades a los que se limita, si se limita.")
@@ -81,7 +94,7 @@ class RespuestaRequisitos(BaseModel):
     que_falta: list[Frase] = _frases("Si informacion_insuficiente es true, qué datos le faltan a la ficha.")
 
 
-class RespuestaIdoneidad(BaseModel):
+class RespuestaIdoneidad(_FormatoIA):
     encaje: Encaje = Field(
         description="alto: cumple lo que exige la ficha y la finalidad encaja con su actividad. "
         "medio: encaja en lo principal, pero hay algo dudoso o que no consta. "

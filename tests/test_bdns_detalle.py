@@ -19,7 +19,9 @@ from typing import Any
 import httpx
 import pytest
 
+from app.models.convocatoria import Convocatoria
 from app.services.bdns_cliente import (
+    MAX_LONGITUD_CODIGO,
     BdnsNoDisponible,
     ClienteBdns,
     ConvocatoriaNoEncontrada,
@@ -119,8 +121,12 @@ async def test_un_codigo_que_no_existe_es_convocatoria_no_encontrada(respuesta: 
     assert error.value.codigo == "999999999"
 
 
-@pytest.mark.parametrize("codigo", ["", "   ", "1" * 31])
-async def test_un_codigo_vacio_o_demasiado_largo_no_llega_a_la_bdns(codigo: str) -> None:
+@pytest.mark.parametrize(
+    "codigo", ["", "   ", "1" * (MAX_LONGITUD_CODIGO + 1), "abc", "933 305", "abc'<x>", "９３３３０５"]
+)
+async def test_un_codigo_que_no_vale_no_llega_a_la_bdns(codigo: str) -> None:
+    """Vacío, demasiado largo o con algo que no sean dígitos (incluidos los de
+    ancho completo, que `isdigit` aceptaría sin `isascii`)."""
     peticiones: list[httpx.Request] = []
 
     def manejador(peticion: httpx.Request) -> httpx.Response:
@@ -204,3 +210,15 @@ async def test_campos_con_forma_inesperada_no_revientan() -> None:
     assert detalle.reglamento is None
     assert detalle.fecha_fin_solicitud is None
     assert detalle.documentos == (DocumentoBdns(descripcion=None, nombre_fichero="bases.pdf"),)
+
+
+@pytest.mark.parametrize("documentos", [3, True, "texto", {"descripcion": "no es una lista"}])
+async def test_documentos_con_forma_inesperada_no_revientan(documentos: Any) -> None:
+    async with _cliente(_responde(httpx.Response(200, json={"id": 1, "documentos": documentos}))) as cliente:
+        detalle = await cliente.obtener_detalle("1")
+
+    assert detalle.documentos == ()
+
+
+def test_el_tope_del_codigo_sale_del_modelo() -> None:
+    assert MAX_LONGITUD_CODIGO == Convocatoria.__table__.c.codigo_bdns.type.length == 30
