@@ -1,4 +1,4 @@
-"""Cliente de Anthropic (Hito 5, tarea H5.1).
+"""Cliente de Anthropic (Hito 5: H5.1, y la respuesta estructurada de H5.2).
 
 **No se llama a Anthropic real**: se inyecta un `AsyncAnthropic` montado sobre
 un `httpx.MockTransport`, igual que en los tests del cliente de la BDNS. Así
@@ -9,11 +9,12 @@ solo se simula el servicio externo. No hace falta base de datos.
 import json
 import logging
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
+from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.services.ia_cliente import (
@@ -311,3 +312,178 @@ def test_sin_algun_precio_no_hay_coste(
     monkeypatch.setattr(settings, "anthropic_precio_salida_millon", salida)
 
     assert calcular_coste(1000, 1000) is None
+
+
+# --- Respuesta estructurada (H5.2) -----------------------------------------
+
+HERRAMIENTA = "registrar_prueba"
+
+
+class _Formato(BaseModel):
+    resumen: str = Field(max_length=200)
+    puntos: list[str] = Field(default_factory=list, max_length=3)
+    encaje: Literal["alto", "bajo"]
+
+
+DATOS_VALIDOS = {"resumen": "Ayudas a la digitalización.", "puntos": ["Pymes", "Hasta 2026"], "encaje": "alto"}
+
+
+def _mensaje_herramienta(datos: Any, *, nombre: str = HERRAMIENTA, stop_reason: str = "tool_use") -> dict[str, Any]:
+    cuerpo = _mensaje(stop_reason=stop_reason)
+    cuerpo["content"] = [{"type": "tool_use", "id": "toolu_prueba", "name": nombre, "input": datos}]
+    return cuerpo
+
+
+async def _generar_estructurado(cliente: ClienteIA):
+    async with cliente:
+        return await cliente.generar_estructurado(
+            sistema=SISTEMA,
+            mensaje=MENSAJE,
+            herramienta=HERRAMIENTA,
+            descripcion="Registra el resultado de la prueba.",
+            formato=_Formato,
+        )
+
+
+async def test_estructurado_devuelve_datos_validados_modelo_y_tokens() -> None:
+    respuesta = await _generar_estructurado(
+        _cliente(lambda peticion: httpx.Response(200, json=_mensaje_herramienta(DATOS_VALIDOS)))
+    )
+
+    assert respuesta.datos == _Formato(**DATOS_VALIDOS)
+    assert respuesta.modelo == "claude-sonnet-5-20260101"
+    assert (respuesta.tokens_entrada, respuesta.tokens_salida) == (120, 45)
+
+
+async def test_estructurado_declara_la_herramienta_con_el_esquema_y_la_obliga() -> None:
+    cuerpos: list[dict[str, Any]] = []
+
+    def manejador(peticion: httpx.Request) -> httpx.Response:
+        cuerpos.append(json.loads(peticion.content))
+        return httpx.Response(200, json=_mensaje_herramienta(DATOS_VALIDOS))
+
+    await _generar_estructurado(_cliente(manejador))
+
+    (cuerpo,) = cuerpos
+    assert cuerpo["tools"] == [
+        {
+            "name": HERRAMIENTA,
+            "description": "Registra el resultado de la prueba.",
+            # El esquema sale del mismo modelo que valida la respuesta.
+            "input_schema": _Formato.model_json_schema(),
+        }
+    ]
+    assert cuerpo["tool_choice"] == {"type": "tool", "name": HERRAMIENTA}
+    assert cuerpo["system"] == SISTEMA
+    assert cuerpo["messages"] == [{"role": "user", "content": MENSAJE}]
+    assert cuerpo["model"] == settings.anthropic_model
+
+
+async def test_generar_sigue_sin_declarar_herramientas() -> None:
+    """La parte común no cambia lo que manda `generar`."""
+    cuerpos: list[dict[str, Any]] = []
+
+    def manejador(peticion: httpx.Request) -> httpx.Response:
+        cuerpos.append(json.loads(peticion.content))
+        return httpx.Response(200, json=_mensaje())
+
+    await _generar(_cliente(manejador))
+
+    assert "tools" not in cuerpos[0]
+    assert "tool_choice" not in cuerpos[0]
+
+
+async def test_estructurado_ignora_el_texto_que_acompane_a_la_herramienta() -> None:
+    def manejador(peticion: httpx.Request) -> httpx.Response:
+        cuerpo = _mensaje_herramienta(DATOS_VALIDOS)
+        cuerpo["content"].insert(0, {"type": "text", "text": "Aquí tienes el análisis."})
+        return httpx.Response(200, json=cuerpo)
+
+    respuesta = await _generar_estructurado(_cliente(manejador))
+
+    assert respuesta.datos.encaje == "alto"
+
+
+@pytest.mark.parametrize(
+    "contenido",
+    [
+        [{"type": "text", "text": '{"resumen": "en texto y no en la herramienta"}'}],
+        [{"type": "tool_use", "id": "toolu_otra", "name": "otra_herramienta", "input": DATOS_VALIDOS}],
+    ],
+)
+async def test_estructurado_sin_la_herramienta_es_invalido(contenido: list[dict[str, Any]]) -> None:
+    def manejador(peticion: httpx.Request) -> httpx.Response:
+        cuerpo = _mensaje(stop_reason="end_turn")
+        cuerpo["content"] = contenido
+        return httpx.Response(200, json=cuerpo)
+
+    with pytest.raises(IARespuestaInvalida, match="formato esperado"):
+        await _generar_estructurado(_cliente(manejador))
+
+
+async def test_estructurado_que_no_cumple_el_formato_es_invalido_sin_filtrar_valores(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="app.services.ia_cliente")
+    datos = {"resumen": "TEST-CONFIDENCIAL-" * 20, "encaje": "TEST-CONFIDENCIAL-valor"}
+
+    with pytest.raises(IARespuestaInvalida, match="no cumple el formato") as error:
+        await _generar_estructurado(_cliente(lambda peticion: httpx.Response(200, json=_mensaje_herramienta(datos))))
+
+    # Ni en el mensaje ni encadenado: el ValidationError lleva los valores.
+    assert error.value.__cause__ is None
+    assert error.value.__suppress_context__ is True
+    mensajes = " ".join(registro.getMessage() for registro in caplog.records)
+    assert "TEST-CONFIDENCIAL" not in str(error.value)
+    assert "TEST-CONFIDENCIAL" not in mensajes
+    # Sí queda qué falló, y los tokens que se pagaron.
+    assert "resumen: string_too_long" in mensajes
+    assert "encaje: literal_error" in mensajes
+    assert "120 tokens de entrada" in mensajes
+
+
+async def test_estructurado_invalido_no_se_repite() -> None:
+    """Cada intento se paga: una respuesta que no vale no se vuelve a pedir."""
+    llamadas = 0
+
+    def manejador(peticion: httpx.Request) -> httpx.Response:
+        nonlocal llamadas
+        llamadas += 1
+        return httpx.Response(200, json=_mensaje_herramienta({"resumen": "sin encaje"}))
+
+    with pytest.raises(IARespuestaInvalida):
+        await _generar_estructurado(_cliente(manejador, max_reintentos=1))
+
+    assert llamadas == 1
+
+
+async def test_estructurado_cortado_por_max_tokens_es_invalido() -> None:
+    def manejador(peticion: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_mensaje_herramienta({"resumen": "a medias"}, stop_reason="max_tokens"))
+
+    with pytest.raises(IARespuestaInvalida, match="límite de tokens"):
+        await _generar_estructurado(_cliente(manejador))
+
+
+async def test_estructurado_sin_clave_falla_sin_llamar_a_nadie(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "anthropic_api_key", "")
+
+    with pytest.raises(IANoConfigurada, match="ANTHROPIC_API_KEY"):
+        await _generar_estructurado(ClienteIA())
+
+
+@pytest.mark.parametrize(
+    ("status", "tipo"),
+    [(401, IANoConfigurada), (400, IARespuestaInvalida), (529, IANoDisponible)],
+)
+async def test_estructurado_traduce_los_errores_igual_y_sin_eco_del_prompt(
+    status: int, tipo: type[Exception], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="app.services.ia_cliente")
+
+    with pytest.raises(tipo) as error:
+        await _generar_estructurado(_cliente(lambda peticion: _error(status)))
+
+    for texto in [str(error.value), *(registro.getMessage() for registro in caplog.records)]:
+        assert "TEST-CONFIDENCIAL" not in texto
+        assert CLAVE_FALSA not in texto

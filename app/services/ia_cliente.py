@@ -1,9 +1,19 @@
 """Cliente mínimo de Anthropic para el Análisis con IA (Hito 5, tarea H5.1).
 
 Un envoltorio fino sobre `AsyncAnthropic` que hace tres cosas y ninguna más:
-manda un prompt, devuelve el texto con los tokens consumidos y traduce los
+manda un prompt, devuelve la respuesta con los tokens consumidos y traduce los
 fallos del SDK a errores propios. No sabe de convocatorias, de empresas ni
 de la base de datos: el prompt lo construye H5.2 y lo que se guarda, H5.3.
+
+**Dos formas de pedir**, con los mismos errores y el mismo log:
+
+- `generar`: la respuesta es texto libre (el asistente conversacional).
+- `generar_estructurado` (H5.2): la respuesta tiene que llegar con la forma
+  de un modelo Pydantic. Se declara una herramienta con el esquema de ese
+  modelo y se obliga a la IA a usarla (*tool use* forzado), así que los datos
+  llegan ya como datos y no como un JSON dentro del texto. Aun así **se
+  validan**: la herramienta obligatoria hace muy raro que falte un campo o
+  sobre un valor, pero no lo impide.
 
 **Errores propios, en tres familias**, porque quien llama tiene que decidir
 cosas distintas con cada una:
@@ -35,11 +45,12 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from types import TracebackType
-from typing import Self
+from typing import Generic, Self, TypeVar
 
 import anthropic
-from anthropic import AsyncAnthropic
-from anthropic.types import TextBlock
+from anthropic import NOT_GIVEN, AsyncAnthropic, NotGiven
+from anthropic.types import Message, TextBlock, ToolChoiceToolParam, ToolParam, ToolUseBlock
+from pydantic import BaseModel, ValidationError
 
 from app.config import settings
 
@@ -48,6 +59,8 @@ logger = logging.getLogger(__name__)
 # `analisis_ia.coste_estimado` es Numeric(10, 4).
 _PRECISION_COSTE = Decimal("0.0001")
 _TOKENS_POR_MILLON = Decimal(1_000_000)
+
+FormatoT = TypeVar("FormatoT", bound=BaseModel)
 
 
 class ErrorIA(RuntimeError):
@@ -76,6 +89,16 @@ class RespuestaIA:
     texto: str
     # El modelo que contestó según Anthropic, no el que se pidió: es el que
     # se guarda en `analisis_ia.modelo_ia`.
+    modelo: str
+    tokens_entrada: int
+    tokens_salida: int
+
+
+@dataclass(frozen=True)
+class RespuestaEstructurada(Generic[FormatoT]):
+    """Como `RespuestaIA`, pero con los datos ya validados en vez de texto."""
+
+    datos: FormatoT
     modelo: str
     tokens_entrada: int
     tokens_salida: int
@@ -118,6 +141,87 @@ class ClienteIA:
 
     async def generar(self, *, sistema: str, mensaje: str, max_tokens: int | None = None) -> RespuestaIA:
         """Una llamada a la Messages API con un único mensaje de usuario."""
+        respuesta = await self._llamar(sistema=sistema, mensaje=mensaje, max_tokens=max_tokens)
+        texto = "".join(bloque.text for bloque in respuesta.content if isinstance(bloque, TextBlock)).strip()
+        if not texto:
+            raise IARespuestaInvalida("La IA devolvió una respuesta vacía.")
+
+        return RespuestaIA(
+            texto=texto,
+            modelo=respuesta.model,
+            tokens_entrada=respuesta.usage.input_tokens,
+            tokens_salida=respuesta.usage.output_tokens,
+        )
+
+    async def generar_estructurado(
+        self,
+        *,
+        sistema: str,
+        mensaje: str,
+        herramienta: str,
+        descripcion: str,
+        formato: type[FormatoT],
+        max_tokens: int | None = None,
+    ) -> RespuestaEstructurada[FormatoT]:
+        """Una llamada que obliga a la IA a contestar con la forma de `formato`.
+
+        `herramienta` y `descripcion` son el nombre y la explicación de la
+        herramienta que ve la IA; el esquema sale de `formato`, el mismo modelo
+        que valida la respuesta. Una respuesta sin la herramienta, o que no
+        cumple el modelo, es `IARespuestaInvalida`, y **no se repite la
+        llamada**: cada intento se paga, y los tokens ya quedan en el log.
+        """
+        respuesta = await self._llamar(
+            sistema=sistema,
+            mensaje=mensaje,
+            max_tokens=max_tokens,
+            herramientas=[
+                {"name": herramienta, "description": descripcion, "input_schema": formato.model_json_schema()}
+            ],
+            eleccion_herramienta={"type": "tool", "name": herramienta},
+        )
+        entrada = next(
+            (
+                bloque.input
+                for bloque in respuesta.content
+                if isinstance(bloque, ToolUseBlock) and bloque.name == herramienta
+            ),
+            None,
+        )
+        if entrada is None:
+            logger.warning("Anthropic: la respuesta no usó la herramienta %s.", herramienta)
+            raise IARespuestaInvalida("La IA no devolvió la respuesta con el formato esperado.")
+
+        try:
+            datos = formato.model_validate(entrada)
+        except ValidationError as exc:
+            # Al log, solo qué campos fallan y por qué tipo de error, nunca los
+            # valores: son texto de la IA y pueden repetir datos de la empresa.
+            errores = ", ".join(
+                f"{'.'.join(map(str, error['loc'])) or '(raíz)'}: {error['type']}" for error in exc.errors()
+            )
+            logger.warning("Anthropic: la respuesta no cumple %s (%s).", formato.__name__, errores)
+            # `from None` por lo mismo: el mensaje de un ValidationError incluye
+            # los valores recibidos, y encadenado acabaría en cualquier traza.
+            raise IARespuestaInvalida("La respuesta de la IA no cumple el formato esperado.") from None
+
+        return RespuestaEstructurada(
+            datos=datos,
+            modelo=respuesta.model,
+            tokens_entrada=respuesta.usage.input_tokens,
+            tokens_salida=respuesta.usage.output_tokens,
+        )
+
+    async def _llamar(
+        self,
+        *,
+        sistema: str,
+        mensaje: str,
+        max_tokens: int | None,
+        herramientas: list[ToolParam] | NotGiven = NOT_GIVEN,
+        eleccion_herramienta: ToolChoiceToolParam | NotGiven = NOT_GIVEN,
+    ) -> Message:
+        """Lo común a las dos formas de pedir: la llamada, los errores y el log."""
         if self._cliente is None:
             raise IANoConfigurada("La IA no está configurada: falta ANTHROPIC_API_KEY.")
 
@@ -128,6 +232,8 @@ class ClienteIA:
                 max_tokens=max_tokens or settings.anthropic_max_tokens,
                 system=sistema,
                 messages=[{"role": "user", "content": mensaje}],
+                tools=herramientas,
+                tool_choice=eleccion_herramienta,
             )
         except anthropic.APIStatusError as exc:
             raise _traducir_status(exc) from exc
@@ -140,7 +246,6 @@ class ClienteIA:
             raise IANoDisponible("No se pudo conectar con Anthropic.") from exc
 
         duracion = time.monotonic() - inicio
-        texto = "".join(bloque.text for bloque in respuesta.content if isinstance(bloque, TextBlock)).strip()
         logger.info(
             "Anthropic: %s, %d tokens de entrada, %d de salida, %.1f s, stop_reason=%s.",
             respuesta.model,
@@ -151,20 +256,12 @@ class ClienteIA:
         )
 
         if respuesta.stop_reason == "max_tokens":
-            # Una respuesta cortada no es "casi buena": el análisis espera un
-            # JSON completo, y medio JSON no se puede leer.
+            # Una respuesta cortada no es "casi buena": ni el texto ni los
+            # datos de la herramienta estarían completos.
             raise IARespuestaInvalida(
                 "La respuesta de la IA se cortó por el límite de tokens (ANTHROPIC_MAX_TOKENS)."
             )
-        if not texto:
-            raise IARespuestaInvalida("La IA devolvió una respuesta vacía.")
-
-        return RespuestaIA(
-            texto=texto,
-            modelo=respuesta.model,
-            tokens_entrada=respuesta.usage.input_tokens,
-            tokens_salida=respuesta.usage.output_tokens,
-        )
+        return respuesta
 
 
 def _traducir_status(exc: anthropic.APIStatusError) -> ErrorIA:

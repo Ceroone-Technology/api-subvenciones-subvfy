@@ -1,7 +1,9 @@
 """Cliente HTTP mínimo de la BDNS.
 
-Solo lectura y **sin tocar la base de datos**: devuelve los resultados al
-motor y ahí acaba. Guardarlos y deduplicarlos es la tarea 3.
+Solo lectura y **sin tocar la base de datos**: devuelve los resultados a quien
+llama y ahí acaba. Dos consultas: la búsqueda, que usa el motor de alertas
+(guardar y deduplicar es la tarea 3), y el detalle de una convocatoria, que es
+lo que se manda a la IA en el análisis (Hito 5).
 
 **Sin reintentos**: cualquier problema de red o HTTP sale como
 `BdnsNoDisponible`, y el aislamiento de fallos del ciclo (ver
@@ -18,6 +20,7 @@ en `None` en vez de reventar con `KeyError`.
 import logging
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from types import TracebackType
 from typing import Any, Self
 
@@ -29,6 +32,9 @@ from app.services.bdns_consulta import ConsultaBdns
 logger = logging.getLogger(__name__)
 
 RUTA_BUSQUEDA = "/convocatorias/busqueda"
+RUTA_DETALLE = "/convocatorias"
+# El tamaño de `convocatoria.codigo_bdns`.
+MAX_LONGITUD_CODIGO = 30
 
 
 class BdnsNoDisponible(RuntimeError):
@@ -37,6 +43,14 @@ class BdnsNoDisponible(RuntimeError):
     def __init__(self, mensaje: str, *, status: int | None = None) -> None:
         super().__init__(mensaje)
         self.status = status
+
+
+class ConvocatoriaNoEncontrada(LookupError):
+    """La BDNS contestó bien, pero no tiene ninguna convocatoria con ese código."""
+
+    def __init__(self, codigo: str) -> None:
+        super().__init__(f"La BDNS no tiene ninguna convocatoria con el código {codigo}.")
+        self.codigo = codigo
 
 
 @dataclass(frozen=True)
@@ -51,6 +65,55 @@ class ConvocatoriaBdns:
     nivel2: str | None
     nivel3: str | None
     financiada_mrr: bool
+
+
+@dataclass(frozen=True)
+class DocumentoBdns:
+    descripcion: str | None
+    nombre_fichero: str | None
+
+
+@dataclass(frozen=True)
+class DetalleConvocatoriaBdns:
+    """La ficha completa de una convocatoria, con nuestros nombres.
+
+    Solo los campos que sirven para analizarla o para guardarla en la caché.
+    Se quedan fuera, a propósito, la descripción en lengua cooficial
+    (`descripcionLeng`), el aviso legal (`advertencia`), los anuncios y los
+    identificadores internos de la BDNS. Las listas de la BDNS llegan como
+    objetos con `descripcion`; aquí quedan como textos.
+    """
+
+    id_bdns: int
+    codigo_bdns: str | None
+    titulo: str | None
+    fecha_registro: date | None
+    nivel1: str | None
+    nivel2: str | None
+    nivel3: str | None
+    financiada_mrr: bool
+    sede_electronica: str | None
+    tipo_convocatoria: str | None
+    finalidad: str | None
+    instrumentos: tuple[str, ...]
+    tipos_beneficiario: tuple[str, ...]
+    sectores: tuple[str, ...]
+    regiones: tuple[str, ...]
+    presupuesto_total: Decimal | None
+    abierta: bool | None
+    # Unas convocatorias traen fechas de solicitud y otras solo un texto
+    # ("Día siguiente a la publicación en DOE"): se guardan las dos cosas.
+    fecha_inicio_solicitud: date | None
+    fecha_fin_solicitud: date | None
+    texto_inicio_solicitud: str | None
+    texto_fin_solicitud: str | None
+    bases_reguladoras: str | None
+    url_bases_reguladoras: str | None
+    reglamento: str | None
+    ayuda_estado: str | None
+    fondos: tuple[str, ...]
+    objetivos: tuple[str, ...]
+    documentos: tuple[DocumentoBdns, ...]
 
 
 @dataclass(frozen=True)
@@ -105,12 +168,32 @@ class ClienteBdns:
             ("order", "fechaRecepcion"),
             ("direccion", "desc"),
         ]
+        # Como tupla y no como lista: `list` es invariante y mypy rechaza
+        # list[tuple[str, str]] donde httpx admite valores de más tipos.
+        respuesta = await self._pedir(RUTA_BUSQUEDA, tuple(parametros))
+        return _leer_pagina(_json(respuesta), pagina)
+
+    async def obtener_detalle(self, codigo: str) -> DetalleConvocatoriaBdns:
+        """La ficha completa de una convocatoria por su código BDNS.
+
+        Un código que no existe no es un error de la BDNS: contesta 204 sin
+        cuerpo, y aquí sale como `ConvocatoriaNoEncontrada`. El código se
+        valida antes de llamar porque, vacío, el cortafuegos de la BDNS no
+        contesta con un error sino con una página HTML de "Acceso denegado".
+        """
+        codigo = codigo.strip()
+        if not codigo or len(codigo) > MAX_LONGITUD_CODIGO:
+            raise ValueError(f"El código BDNS debe tener entre 1 y {MAX_LONGITUD_CODIGO} caracteres.")
+
+        respuesta = await self._pedir(RUTA_DETALLE, (("numConv", codigo),))
+        if respuesta.status_code == httpx.codes.NO_CONTENT or not respuesta.content.strip():
+            raise ConvocatoriaNoEncontrada(codigo)
+        return _leer_detalle(_json(respuesta))
+
+    async def _pedir(self, ruta: str, parametros: tuple[tuple[str, str], ...]) -> httpx.Response:
         try:
-            # Como tupla y no como lista: `list` es invariante y mypy rechaza
-            # list[tuple[str, str]] donde httpx admite valores de más tipos.
-            respuesta = await self._cliente.get(RUTA_BUSQUEDA, params=tuple(parametros))
+            respuesta = await self._cliente.get(ruta, params=parametros)
             respuesta.raise_for_status()
-            cuerpo = respuesta.json()
         except httpx.HTTPStatusError as exc:
             raise BdnsNoDisponible(
                 f"La BDNS respondió {exc.response.status_code}.", status=exc.response.status_code
@@ -119,10 +202,7 @@ class ClienteBdns:
             # Cubre timeouts y errores de transporte: para quien llama es lo
             # mismo, la BDNS no está disponible ahora.
             raise BdnsNoDisponible(f"No se pudo consultar la BDNS: {exc!r}.") from exc
-        except ValueError as exc:
-            raise BdnsNoDisponible(f"La BDNS devolvió algo que no es JSON: {exc}.") from exc
-
-        return _leer_pagina(cuerpo, pagina)
+        return respuesta
 
     async def buscar_todo(self, consulta: ConsultaBdns) -> list[ConvocatoriaBdns]:
         """Recorre las páginas hasta la última o hasta el tope configurado.
@@ -147,6 +227,13 @@ class ClienteBdns:
             # trae cada convocatoria.
             encontradas = [convocatoria for convocatoria in encontradas if convocatoria.financiada_mrr]
         return encontradas
+
+
+def _json(respuesta: httpx.Response) -> Any:
+    try:
+        return respuesta.json()
+    except ValueError as exc:
+        raise BdnsNoDisponible(f"La BDNS devolvió algo que no es JSON: {exc}.") from exc
 
 
 def _leer_pagina(cuerpo: Any, pagina_pedida: int) -> PaginaBdns:
@@ -181,8 +268,93 @@ def _leer_convocatoria(fila: dict[str, Any]) -> ConvocatoriaBdns:
     )
 
 
+def _leer_detalle(cuerpo: Any) -> DetalleConvocatoriaBdns:
+    if not isinstance(cuerpo, dict):
+        raise BdnsNoDisponible("La BDNS devolvió un detalle inesperado (no es un objeto JSON).")
+    try:
+        id_bdns = int(cuerpo["id"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise BdnsNoDisponible("La BDNS devolvió un detalle sin identificador.") from exc
+
+    organo = cuerpo.get("organo")
+    if not isinstance(organo, dict):
+        organo = {}
+    reglamento = cuerpo.get("reglamento")
+    return DetalleConvocatoriaBdns(
+        id_bdns=id_bdns,
+        # En el detalle se llama `codigoBDNS`; en la búsqueda, `numeroConvocatoria`.
+        codigo_bdns=_texto_limpio(cuerpo.get("codigoBDNS")),
+        titulo=_texto_limpio(cuerpo.get("descripcion")),
+        fecha_registro=_fecha(cuerpo.get("fechaRecepcion")),
+        nivel1=_texto_limpio(organo.get("nivel1")),
+        nivel2=_texto_limpio(organo.get("nivel2")),
+        nivel3=_texto_limpio(organo.get("nivel3")),
+        financiada_mrr=bool(cuerpo.get("mrr", False)),
+        sede_electronica=_texto_limpio(cuerpo.get("sedeElectronica")),
+        tipo_convocatoria=_texto_limpio(cuerpo.get("tipoConvocatoria")),
+        finalidad=_texto_limpio(cuerpo.get("descripcionFinalidad")),
+        instrumentos=_descripciones(cuerpo.get("instrumentos")),
+        tipos_beneficiario=_descripciones(cuerpo.get("tiposBeneficiarios")),
+        sectores=_descripciones(cuerpo.get("sectores")),
+        regiones=_descripciones(cuerpo.get("regiones")),
+        presupuesto_total=_importe(cuerpo.get("presupuestoTotal")),
+        abierta=cuerpo["abierto"] if isinstance(cuerpo.get("abierto"), bool) else None,
+        fecha_inicio_solicitud=_fecha(cuerpo.get("fechaInicioSolicitud")),
+        fecha_fin_solicitud=_fecha(cuerpo.get("fechaFinSolicitud")),
+        texto_inicio_solicitud=_texto_limpio(cuerpo.get("textInicio")),
+        texto_fin_solicitud=_texto_limpio(cuerpo.get("textFin")),
+        bases_reguladoras=_texto_limpio(cuerpo.get("descripcionBasesReguladoras")),
+        url_bases_reguladoras=_texto_limpio(cuerpo.get("urlBasesReguladoras")),
+        reglamento=_texto_limpio(reglamento.get("descripcion")) if isinstance(reglamento, dict) else None,
+        ayuda_estado=_texto_limpio(cuerpo.get("ayudaEstado")),
+        fondos=_descripciones(cuerpo.get("fondos")),
+        objetivos=_descripciones(cuerpo.get("objetivos")),
+        documentos=tuple(
+            DocumentoBdns(
+                descripcion=_texto_limpio(documento.get("descripcion")),
+                nombre_fichero=_texto_limpio(documento.get("nombreFic")),
+            )
+            for documento in cuerpo.get("documentos") or []
+            if isinstance(documento, dict)
+        ),
+    )
+
+
 def _texto(valor: Any) -> str | None:
     return str(valor) if valor is not None else None
+
+
+def _texto_limpio(valor: Any) -> str | None:
+    """Como `_texto`, pero sin espacios sobrantes y con la cadena vacía como
+    None: la BDNS devuelve textos como "SUBVENCIÓN ... CONTRAPRESTACIÓN "."""
+    texto = str(valor).strip() if valor is not None else ""
+    return texto or None
+
+
+def _descripciones(valor: Any) -> tuple[str, ...]:
+    """`[{"descripcion": "..."}, ...]` → `("...", ...)`, sin vacíos.
+
+    Acepta también textos sueltos, por si algún campo de la BDNS que hoy llega
+    vacío (`fondos`, `objetivos`) viene en otra forma.
+    """
+    if not isinstance(valor, list):
+        return ()
+    textos = (_texto_limpio(item.get("descripcion") if isinstance(item, dict) else item) for item in valor)
+    return tuple(texto for texto in textos if texto)
+
+
+def _importe(valor: Any) -> Decimal | None:
+    """Un importe ilegible no invalida la convocatoria entera."""
+    if valor is None or isinstance(valor, bool):
+        return None
+    try:
+        importe = Decimal(str(valor))
+    except InvalidOperation:
+        importe = None
+    if importe is None or not importe.is_finite():
+        logger.warning("BDNS: importe no interpretable %r.", valor)
+        return None
+    return importe
 
 
 def _fecha(valor: Any) -> date | None:
