@@ -100,6 +100,10 @@ class DetalleConvocatoriaBdns:
     sectores: tuple[str, ...]
     regiones: tuple[str, ...]
     presupuesto_total: Decimal | None
+    # Ojo: el `abierto` de la BDNS **no** dice si el plazo está abierto hoy.
+    # En 40 fichas consultadas el 2026-10-04, una con plazo del 01/10 al 01/11
+    # salía `false`, y los únicos `true` eran concesiones sin fechas. No se
+    # usa para decidir nada ni se manda a la IA.
     abierta: bool | None
     # Unas convocatorias traen fechas de solicitud y otras solo un texto
     # ("Día siguiente a la publicación en DOE"): se guardan las dos cosas.

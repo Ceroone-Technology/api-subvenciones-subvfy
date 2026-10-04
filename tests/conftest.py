@@ -17,8 +17,10 @@ apoya en dos convenciones que todos los tests respetan: los NIF empiezan
 por `TEST-` y los emails terminan en EMAIL_DOMINIO_TEST.
 """
 
+import json
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -38,6 +40,7 @@ from app.models import (
     Rol,
     Usuario,
 )
+from app.services.bdns_cliente import DetalleConvocatoriaBdns, _leer_detalle
 
 NIF_PREFIJO_TEST = "TEST-"
 # Subdominio de example.com (RFC 2606, nunca entregable) y no un TLD
@@ -48,6 +51,8 @@ PASSWORD_TEST = "password-de-prueba"
 # Las convocatorias de prueba tambien necesitan su marca: son filas de la
 # cache local que los favoritos siembran al vuelo.
 CODIGO_BDNS_PREFIJO_TEST = "TST"
+# Respuestas reales del detalle de la BDNS (datos públicos), ver test_bdns_detalle.py.
+FICHAS_BDNS = Path(__file__).parent / "fixtures" / "bdns"
 
 
 @dataclass(frozen=True)
@@ -73,6 +78,12 @@ def nif_de_prueba() -> str:
 
 def email_de_prueba(prefijo: str = "test") -> str:
     return f"{prefijo}-{uuid4().hex[:8]}{EMAIL_DOMINIO_TEST}"
+
+
+def ficha_bdns(codigo: str) -> DetalleConvocatoriaBdns:
+    """Una ficha real de la BDNS ya leída, sin pasar por HTTP: el mismo parseo
+    que usa `ClienteBdns.obtener_detalle`."""
+    return _leer_detalle(json.loads((FICHAS_BDNS / f"detalle_{codigo}.json").read_text(encoding="utf-8")))
 
 
 def codigo_bdns_de_prueba() -> str:
