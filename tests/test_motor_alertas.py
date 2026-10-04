@@ -511,6 +511,39 @@ async def test_si_falla_el_registro_del_fallo_el_ciclo_sigue(
     assert (await _alerta_en_bd(rota)).ultima_ejecucion_at is None
 
 
+async def test_si_falla_el_marcado_la_alerta_deja_rastro_y_el_ciclo_sigue(
+    gestor: Sesion, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_marcar_ejecutada` estaba fuera del `try`: su fallo abortaba el resto
+    del lote y no dejaba fila de error ni espera."""
+    rota = await _crear_alerta(gestor.id, nombre="Falla al marcarse")
+    sana = await _crear_alerta(gestor.id, nombre="Se marca bien")
+    marcar_de_verdad = motor_alertas._marcar_ejecutada
+
+    async def marcado_roto(db: AsyncSession, alerta_id: int, usuario_sistema_id: int, ahora: datetime) -> None:
+        if alerta_id == rota:
+            raise ConnectionError("la base de datos se ha caído")
+        await marcar_de_verdad(db, alerta_id, usuario_sistema_id, ahora)
+
+    async def evaluador(db: AsyncSession, alerta: Alerta, usuario_sistema_id: int) -> None:
+        return None
+
+    monkeypatch.setattr(motor_alertas, "_marcar_ejecutada", marcado_roto)
+
+    resumen = await _procesar(evaluador)
+
+    assert (resumen.evaluadas, resumen.fallidas) == (1, 1)
+    [(_, estado, detalle)] = await _ejecuciones_de(rota)
+    assert estado == "error"
+    assert detalle is not None and "ConnectionError" in detalle
+    alerta_rota = await _alerta_en_bd(rota)
+    assert alerta_rota.ultima_ejecucion_at is None
+    assert alerta_rota.fallos_consecutivos == 1
+    assert alerta_rota.proximo_reintento_at == AHORA + timedelta(minutes=15)
+    # El ciclo no se cortó: la siguiente del lote se evaluó y se marcó.
+    assert (await _alerta_en_bd(sana)).ultima_ejecucion_at == AHORA
+
+
 async def test_registrar_el_fallo_de_una_alerta_borrada_no_hace_nada(gestor: Sesion) -> None:
     async with AsyncSessionLocal() as db:
         sistema_id = await id_usuario_sistema(db)

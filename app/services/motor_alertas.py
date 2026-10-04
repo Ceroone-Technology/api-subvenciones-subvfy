@@ -181,6 +181,10 @@ async def procesar_alertas_pendientes(
     for alerta in pendientes:
         try:
             await evaluar(db, alerta, usuario_sistema_id)
+            # El marcado va dentro del try: si falla (la conexión se cae), es
+            # un fallo más de la alerta, con su fila de error y su espera, y
+            # no corta el resto del lote.
+            await _marcar_ejecutada(db, alerta.id, usuario_sistema_id, ahora)
         except Exception as error:
             # La espera se cuenta desde el fallo, no desde el inicio del
             # ciclo: con la BDNS caída cada alerta agota su timeout, el lote
@@ -194,7 +198,6 @@ async def procesar_alertas_pendientes(
             await db.rollback()
             await _registrar_fallo(db, alerta.id, error, usuario_sistema_id, momento_fallo)
             continue
-        await _marcar_ejecutada(db, alerta.id, usuario_sistema_id, ahora)
         evaluadas += 1
 
     resumen = ResumenCiclo(pendientes=len(pendientes), evaluadas=evaluadas, fallidas=fallidas)
