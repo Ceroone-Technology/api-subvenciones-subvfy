@@ -349,12 +349,41 @@ desaparece; si hiciera falta antes, se envolvería el ciclo en un
 
 ### Análisis con IA (en construcción, Hito 5)
 
-Por ahora solo existe el **cliente de Anthropic** (`app/services/ia_cliente.py`);
-los prompts y los endpoints llegan en las tareas siguientes. El cliente manda un
-prompt, devuelve el texto con los tokens consumidos y traduce los fallos a tres
+Hechos el **cliente de Anthropic** (H5.1) y los **prompts y el análisis** (H5.2).
+Faltan los endpoints y el guardado (H5.3) y el score de idoneidad (H5.4), así que
+todavía no hay nada que llamar por HTTP. **Nada se ha probado contra Anthropic
+real**: no hay clave todavía.
+
+**Cliente** (`app/services/ia_cliente.py`). Manda un prompt y devuelve la
+respuesta con los tokens consumidos, de dos formas: texto libre (`generar`) o
+datos con un formato fijo (`generar_estructurado`, que obliga a la IA a usar una
+herramienta con ese formato y valida lo que vuelve). Traduce los fallos a tres
 errores propios: la IA **no está configurada** (sin clave, clave rechazada o
-modelo inexistente), **no está disponible** (timeout, red, 429, 5xx) o la
-**respuesta no vale** (vacía o cortada por el límite de tokens).
+modelo inexistente), **no está disponible** (timeout, red, 429, 5xx, una página
+de un proxy) o la **respuesta no vale** (vacía, cortada por el límite de tokens o
+fuera del formato). Una respuesta que no vale no se repite: cada llamada se paga.
+
+**Análisis** (`app/services/analisis_ia.py`, con los prompts en
+`app/services/ia_prompts.py` y los formatos en `app/schemas/analisis_ia.py`).
+El backend consulta la ficha de la convocatoria a la BDNS
+(`ClienteBdns.obtener_detalle`) y hace **una llamada por tipo**, en paralelo:
+
+- **Resumen** y **requisitos clave**: dependen solo de la convocatoria y se
+  comparten entre empresas. No reciben ningún dato de la empresa.
+- **Idoneidad**: si la convocatoria encaja con una empresa. Devuelve una
+  categoría (`alto`, `medio`, `bajo`, `no_encaja`) con motivos a favor, en
+  contra y lo que hay que verificar. El score de 0 a 100 lo calculará el código
+  en H5.4.
+
+Los requisitos se limitan a lo que publica la BDNS, que **no incluye las bases
+reguladoras**: requisitos e idoneidad llevan siempre un aviso que pone el código,
+no la IA. A la IA **no se le envían la razón social ni el NIF**: del NIF solo se
+deriva el tipo de persona. Si el perfil de la empresa no tiene ninguno de los
+datos que importan (comunidad, sector, tamaño, actividad), no se llama a la IA.
+Si un análisis falla, los demás se conservan.
+
+El tipo de análisis `riesgos` existe en la base de datos, pero **no se genera**:
+no es una funcionalidad olvidada, se dejó fuera a propósito.
 
 Sin `ANTHROPIC_API_KEY` la API arranca igual: lo que falla, con un mensaje claro,
 es generar un análisis. Ni la clave ni el contenido del prompt salen nunca en
@@ -365,13 +394,30 @@ ANTHROPIC_API_KEY=                 # vacía: la IA responde "no configurada"
 ANTHROPIC_MODEL=claude-sonnet-5
 ANTHROPIC_TIMEOUT_SEGUNDOS=60      # por intento
 ANTHROPIC_MAX_REINTENTOS=1         # del SDK, ante 429/5xx/red
-ANTHROPIC_MAX_TOKENS=2048
+ANTHROPIC_MAX_TOKENS=2048          # general; cada análisis pide 4096 (ver app/services/ia_prompts.py)
 # ANTHROPIC_PRECIO_ENTRADA_MILLON=   USD por millón de tokens; sin los dos
 # ANTHROPIC_PRECIO_SALIDA_MILLON=    precios, el coste estimado queda vacío
 ```
 
 Las variables de precio van comentadas en `.env.example` a propósito: una
 variable de precio **vacía** no es válida y la app no arrancaría.
+
+#### Probar el análisis con convocatorias reales (cuesta dinero)
+
+> **Cada ejecución hace llamadas de pago a la API de Anthropic**: 2 por
+> convocatoria, 3 si se añade una empresa. El propio comando lo avisa al empezar.
+
+```bash
+docker compose exec api python -m app.cli probar-analisis --codigo 933305
+docker compose exec api python -m app.cli probar-analisis --codigo 933305 --empresa-id 12   # añade la idoneidad
+```
+
+Consulta la convocatoria a la BDNS, lanza los análisis e imprime cada resultado
+con el modelo, los tokens y el coste estimado (si están configurados los
+precios). Es una herramienta para comprobar la calidad a mano: **no guarda nada**
+en la base de datos y no imprime ni la clave ni el prompt. Sin clave, se para
+antes de llamar a nadie. Termina con código 0 si todo sale bien, 1 si falla algún
+análisis y 2 si no se llega a llamar a la IA.
 
 ### Primer administrador
 
@@ -405,6 +451,10 @@ Los tests de endpoints escriben en una base de datos real (no mocks) y limpian
 sus filas al terminar; para poder distinguirlas usan NIFs con prefijo `TEST-` y
 emails bajo `@test.subvfy.example.com`.
 
+Los tests nunca llaman a la BDNS ni a Anthropic: los simulan con
+`httpx.MockTransport`. Las fichas de `tests/fixtures/bdns/` son respuestas reales
+de la BDNS guardadas, para probar contra la forma de verdad de los datos.
+
 ## Estructura
 
 ```
@@ -415,9 +465,9 @@ app/
   models/          # modelos SQLAlchemy (uno por tabla de schema-subvfy.sql)
   schemas/         # schemas Pydantic de request/response
   api/routes/      # un router por recurso (rol, empresa, usuario, auth, ...)
-  services/        # lógica de negocio sin HTTP (alertas, motor de alertas, cliente de IA, identidad de sistema)
+  services/        # lógica de negocio sin HTTP (alertas, motor de alertas, BDNS, cliente y análisis de IA, identidad de sistema)
   core/            # seguridad (JWT/hash), permisos por rol, scheduler
-  cli.py           # utilidades de consola (crear el primer admin)
+  cli.py           # utilidades de consola (crear el primer admin, probar el análisis con IA)
 alembic/           # migraciones
 tests/             # pytest + httpx.AsyncClient
 ```
@@ -431,7 +481,8 @@ El desarrollo se organiza como Hito → Funcionalidad → Tarea en `api-hitos-fu
 - Hito 2, Funcionalidad 3 — API de empresa/rol/usuario: **hecho** (schemas Pydantic + CRUD paginado + hashing de contraseñas).
 - Hito 2, Funcionalidad 4 — Autenticación real (JWT): **hecho** (login/refresh/logout/me, autorización por rol, aislamiento multi-tenant, 70 tests contra Postgres real).
 - Hito 3, Funcionalidad 1 — Endpoints de favoritos: **hecho** (marcar/quitar, listado con join a convocatoria, nota personal, 85 tests contra Postgres real).
-- Hito 5, Funcionalidad 1 — Análisis por convocatoria, tarea 1 (integración del SDK de Anthropic): **hecho** (cliente con errores propios, timeout y reintentos configurables, coste estimado; 286 tests, el cliente con MockTransport). Sin probar contra Anthropic real: no hay clave todavía. Pendientes los prompts, los endpoints y el score de idoneidad.
+- Hito 5, Funcionalidad 1 — Análisis por convocatoria, tarea 1 (integración del SDK de Anthropic): **hecho** (cliente con errores propios, timeout y reintentos configurables, coste estimado; 286 tests, el cliente con MockTransport). Sin probar contra Anthropic real: no hay clave todavía.
+- Hito 5, Funcionalidad 1 — Análisis por convocatoria, tarea 2 (prompts del análisis): **hecho** (consulta del detalle a la BDNS, resumen, requisitos clave e idoneidad con una llamada por tipo y respuesta estructurada, comando `probar-analisis`; 434 tests). Sin probar contra Anthropic real. Pendientes los endpoints y el guardado (tarea 3) y el score de idoneidad (tarea 4).
 - Hito 4 — Ejecuciones fallidas de alerta visibles y con reintentos espaciados: **hecho** (fila `error` en el historial, espera creciente de 15 min a 24 h, migración `a3f9d27c51b8`; 255 tests contra Postgres real).
 - Hito 4 — Motor de ejecución de alertas (tarea 3 de 3, deduplicación y registro): **hecho** (dedup por alerta con garantía de base de datos, registro transaccional del historial y migración `d8c5e0cf33c8`; 229 tests contra Postgres real). Pendiente el envío del aviso.
 - Hito 4 — Motor de ejecución de alertas (tarea 2 de 3, consulta a la BDNS): **hecho** (constructor puro de la consulta + cliente HTTP con topes y timeouts; 219 tests contra Postgres real, el cliente con MockTransport). Pendiente el registro del historial.
