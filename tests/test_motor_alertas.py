@@ -6,6 +6,7 @@ insertan en BD con un `ultima_ejecucion_at` explícito: es la única forma de
 comprobar la frecuencia sin esperar un día.
 """
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -112,11 +113,18 @@ def bdns_falsa(monkeypatch: pytest.MonkeyPatch) -> type[_ClienteBdnsFalso]:
     return _ClienteBdnsFalso
 
 
-async def _procesar(evaluador: Evaluador | None = None, *, ahora: datetime = AHORA) -> ResumenCiclo:
+async def _procesar(
+    evaluador: Evaluador | None = None,
+    *,
+    ahora: datetime = AHORA,
+    reloj: Callable[[], datetime] | None = None,
+) -> ResumenCiclo:
+    """Por defecto, un reloj parado en `ahora`: el ciclo y sus fallos ven la
+    misma hora. Para que el tiempo avance durante el ciclo, `reloj`."""
     async with AsyncSessionLocal() as db:
         sistema_id = await id_usuario_sistema(db)
         return await procesar_alertas_pendientes(
-            db, usuario_sistema_id=sistema_id, evaluador=evaluador, ahora=ahora
+            db, usuario_sistema_id=sistema_id, evaluador=evaluador, reloj=reloj or (lambda: ahora)
         )
 
 
@@ -420,6 +428,29 @@ async def test_fallar_otra_vez_alarga_la_espera(gestor: Sesion) -> None:
     assert [estado for _, estado, _ in await _ejecuciones_de(alerta_id)] == ["error", "error"]
     # Y nunca avanzó el punto desde el que se consulta la BDNS.
     assert alerta.ultima_ejecucion_at is None
+
+
+async def test_la_espera_se_cuenta_desde_el_fallo_y_no_desde_el_inicio_del_ciclo(gestor: Sesion) -> None:
+    """Con la BDNS caída cada alerta agota su timeout y el lote puede durar
+    más que la primera espera. Contada desde el inicio del ciclo, la marca
+    nacía vencida y el tick siguiente volvía a coger la alerta."""
+    lenta = await _crear_alerta(gestor.id, nombre="Agota el timeout")
+    sana = await _crear_alerta(gestor.id, nombre="Va bien")
+    reloj = [AHORA]
+
+    async def evaluador(db: AsyncSession, alerta: Alerta, usuario_sistema_id: int) -> None:
+        if alerta.id == lenta:
+            reloj[0] += timedelta(minutes=20)
+            raise RuntimeError("la BDNS no responde")
+
+    await _procesar(evaluador, reloj=lambda: reloj[0])
+
+    alerta_lenta = await _alerta_en_bd(lenta)
+    assert alerta_lenta.proximo_reintento_at == AHORA + timedelta(minutes=20 + 15)
+    assert lenta not in await _ids_pendientes(AHORA + timedelta(minutes=34))
+    # Lo que sale bien se sigue marcando con la hora del ciclo, aunque se
+    # evalúe después del fallo: la selección por frecuencia es del lote.
+    assert (await _alerta_en_bd(sana)).ultima_ejecucion_at == AHORA
 
 
 def test_la_espera_crece_al_doble_y_tiene_tope() -> None:

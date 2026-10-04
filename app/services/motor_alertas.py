@@ -22,8 +22,8 @@ a la BDNS: avanzarlo perdería lo publicado entre medias).
 **Un fallo deja rastro y no se reintenta a ciegas**: tras el rollback se
 escribe, en una transacción aparte, una fila `alerta_ejecucion` con estado
 `error`, y la alerta espera antes de volver a tocar (`proximo_reintento_at`:
-15 min, 30 min, 1 h… con tope de 24 h). Un éxito, o editar la alerta, reinicia
-la espera.
+15 min, 30 min, 1 h… con tope de 24 h), contada desde el momento del fallo y
+no desde el inicio del ciclo. Un éxito, o editar la alerta, reinicia la espera.
 """
 
 import logging
@@ -161,15 +161,18 @@ async def procesar_alertas_pendientes(
     *,
     usuario_sistema_id: int,
     evaluador: Evaluador | None = None,
-    ahora: datetime | None = None,
+    reloj: Callable[[], datetime] | None = None,
 ) -> ResumenCiclo:
     """Un ciclo del motor: selecciona, evalúa una a una y marca lo hecho.
 
-    `evaluador` existe para que los tests puedan inyectar un doble; en
-    producción es `evaluar_alerta`.
+    `evaluador` y `reloj` existen para que los tests puedan inyectar dobles;
+    en producción son `evaluar_alerta` y `datetime.now(UTC)`. El reloj se
+    consulta una vez al empezar (selección y marca de las que salen bien,
+    coherentes en todo el lote) y otra en cada fallo (su espera).
     """
     evaluar = evaluador or evaluar_alerta
-    ahora = ahora or datetime.now(UTC)
+    reloj = reloj or _ahora_utc
+    ahora = reloj()
     pendientes = await alertas_pendientes(db, ahora=ahora)
     logger.info("Motor de alertas: %d alerta(s) pendientes.", len(pendientes))
 
@@ -179,13 +182,17 @@ async def procesar_alertas_pendientes(
         try:
             await evaluar(db, alerta, usuario_sistema_id)
         except Exception as error:
+            # La espera se cuenta desde el fallo, no desde el inicio del
+            # ciclo: con la BDNS caída cada alerta agota su timeout, el lote
+            # dura más que la primera espera y las marcas nacerían vencidas.
+            momento_fallo = reloj()
             # Aislamiento entre alertas: el fallo de una no puede tumbar el
             # ciclo. Se loguea con traza y con el id (nada de datos del
             # usuario), y se deja la sesión limpia para la siguiente.
             fallidas += 1
             logger.exception("Motor de alertas: falló la alerta %s; se continúa con las demás.", alerta.id)
             await db.rollback()
-            await _registrar_fallo(db, alerta.id, error, usuario_sistema_id, ahora)
+            await _registrar_fallo(db, alerta.id, error, usuario_sistema_id, momento_fallo)
             continue
         await _marcar_ejecutada(db, alerta.id, usuario_sistema_id, ahora)
         evaluadas += 1
@@ -195,6 +202,10 @@ async def procesar_alertas_pendientes(
         "Motor de alertas: ciclo terminado (%d evaluadas, %d con error).", resumen.evaluadas, resumen.fallidas
     )
     return resumen
+
+
+def _ahora_utc() -> datetime:
+    return datetime.now(UTC)
 
 
 async def _registrar_fallo(

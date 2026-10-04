@@ -178,6 +178,10 @@ async def registrar_fallo(
     sobrevive. Escribe la fila `alerta_ejecucion` con estado `error` y su
     detalle, sube `fallos_consecutivos` y fija `proximo_reintento_at`.
 
+    `ahora` es **el momento del fallo**, no el inicio del ciclo: un lote con
+    la BDNS caída puede durar más que la primera espera, y contarla desde el
+    inicio dejaría la marca vencida al escribirla.
+
     **No toca `ultima_ejecucion_at`**: es el `desde` de la consulta a la BDNS,
     y avanzarlo perdería lo publicado entre el fallo y el reintento.
 
