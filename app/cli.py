@@ -13,18 +13,41 @@ conocida (y publicada en el repositorio) en toda instalación.
 
 Si se omite `--password`, se pide por consola sin mostrarla. Si la empresa
 ya existe (por NIF), se reutiliza en vez de crear otra.
+
+`probar-analisis` (Hito 5, H5.2) sirve para comprobar a mano la calidad del
+Análisis con IA con convocatorias reales. **CUESTA DINERO: cada ejecución hace
+2 o 3 llamadas de pago a la API de Anthropic.** Consulta la convocatoria a la
+BDNS, lanza el resumen y los requisitos clave (y la idoneidad, con
+`--empresa-id`) e imprime el resultado con el modelo, los tokens y el coste
+estimado. Es una herramienta de verificación, no una funcionalidad: **no
+guarda nada en la base de datos** y no imprime ni la clave ni el prompt.
+
+    docker compose exec api python -m app.cli probar-analisis --codigo 933305 [--empresa-id 12]
 """
 
 import argparse
 import asyncio
 import getpass
+import json
 import sys
+from datetime import date
+from decimal import Decimal
 
 from sqlalchemy import select
 
+from app.config import settings
 from app.core.security import PASSWORD_MIN_LONGITUD, hashear_password
 from app.database import AsyncSessionLocal
 from app.models import Empresa, Rol, Usuario
+from app.services.analisis_ia import AnalisisGenerado, analizar_convocatoria
+from app.services.bdns_cliente import BdnsNoDisponible, ClienteBdns, ConvocatoriaNoEncontrada
+from app.services.ia_cliente import ClienteIA
+from app.services.ia_entrada import PerfilEmpresa, cargar_perfil
+
+AVISO_COSTE = (
+    "AVISO: este comando hace llamadas de pago a la API de Anthropic (2, o 3 con --empresa-id). "
+    "Cada ejecución cuesta dinero."
+)
 
 
 async def crear_admin(
@@ -73,6 +96,74 @@ async def crear_admin(
         print("Ya puedes obtener un token con POST /auth/login.")
 
 
+async def probar_analisis(
+    *,
+    codigo: str,
+    empresa_id: int | None = None,
+    cliente_bdns: ClienteBdns | None = None,
+    cliente_ia: ClienteIA | None = None,
+) -> int:
+    """Analiza una convocatoria real e imprime el resultado. Devuelve el
+    código de salida: 0 si todos los análisis salen bien, 1 si alguno falla y
+    2 si no se llega a llamar a la IA.
+
+    Los clientes se pueden inyectar para los tests; sin ellos se usan los
+    reales. Lo único que lee de la base de datos es el perfil de la empresa.
+    """
+    print(AVISO_COSTE)
+    if cliente_ia is None and not settings.anthropic_api_key:
+        print("No se puede analizar: falta ANTHROPIC_API_KEY en el .env.")
+        return 2
+
+    perfil: PerfilEmpresa | None = None
+    if empresa_id is not None:
+        async with AsyncSessionLocal() as db:
+            perfil = await cargar_perfil(db, empresa_id)
+        if perfil is None:
+            print(f"No existe ninguna empresa con id {empresa_id}.")
+            return 2
+
+    try:
+        async with cliente_bdns or ClienteBdns() as bdns:
+            ficha = await bdns.obtener_detalle(codigo)
+    except (ValueError, ConvocatoriaNoEncontrada, BdnsNoDisponible) as exc:
+        print(f"No se pudo obtener la convocatoria: {exc}")
+        return 2
+
+    print(f"Convocatoria {ficha.codigo_bdns}: {ficha.titulo or '(sin título)'}")
+    async with cliente_ia or ClienteIA() as ia:
+        resultados = await analizar_convocatoria(ia, ficha, perfil, hoy=date.today())
+
+    for tipo, resultado in resultados.items():
+        print()
+        if isinstance(resultado, AnalisisGenerado):
+            coste = f"{resultado.coste_estimado} USD" if resultado.coste_estimado is not None else "sin calcular"
+            print(f"== {tipo} ({resultado.version_prompt}) ==")
+            print(
+                f"Modelo: {resultado.modelo} | Tokens: {resultado.tokens_entrada} de entrada, "
+                f"{resultado.tokens_salida} de salida | Coste estimado: {coste}"
+            )
+            print(json.dumps(resultado.resultado.model_dump(mode="json"), ensure_ascii=False, indent=2))
+        else:
+            # Los mensajes de nuestros errores son fijos: no llevan ni el
+            # prompt ni el cuerpo de la respuesta de Anthropic.
+            print(f"== {tipo} ==")
+            print(f"ERROR ({type(resultado).__name__}): {resultado}")
+
+    generados = [r for r in resultados.values() if isinstance(r, AnalisisGenerado)]
+    costes = [r.coste_estimado for r in generados]
+    coste_total = sum((c for c in costes if c is not None), Decimal(0)) if costes and None not in costes else None
+    texto_coste = f"{coste_total} USD" if coste_total is not None else "sin calcular"
+    print()
+    print(
+        f"Total: {sum(r.tokens_entrada for r in generados)} tokens de entrada, "
+        f"{sum(r.tokens_salida for r in generados)} de salida, coste estimado {texto_coste}."
+    )
+    if coste_total is None and generados:
+        print("(Para calcular el coste, configura ANTHROPIC_PRECIO_ENTRADA_MILLON y ANTHROPIC_PRECIO_SALIDA_MILLON.)")
+    return 0 if len(generados) == len(resultados) else 1
+
+
 def _pedir_password() -> str:
     password = getpass.getpass("Contraseña del admin: ")
     if password != getpass.getpass("Repite la contraseña: "):
@@ -97,7 +188,22 @@ def main(argv: list[str] | None = None) -> None:
         help="Si se omite, se pide por consola (recomendado: no queda en el historial del shell).",
     )
 
+    probar = subcomandos.add_parser(
+        "probar-analisis",
+        help="CUESTA DINERO: analiza con la IA una convocatoria real de la BDNS (2 o 3 llamadas de pago).",
+        description=f"{AVISO_COSTE} Comprueba a mano la calidad del Análisis con IA. No guarda nada.",
+    )
+    probar.add_argument("--codigo", required=True, help="Código BDNS de la convocatoria (solo dígitos).")
+    probar.add_argument(
+        "--empresa-id",
+        type=int,
+        help="Id de una empresa: añade la idoneidad con su perfil (una llamada de pago más).",
+    )
+
     args = parser.parse_args(argv)
+    if args.comando == "probar-analisis":
+        raise SystemExit(asyncio.run(probar_analisis(codigo=args.codigo, empresa_id=args.empresa_id)))
+
     password = args.password or _pedir_password()
     if len(password) < PASSWORD_MIN_LONGITUD:
         raise SystemExit(f"La contraseña debe tener al menos {PASSWORD_MIN_LONGITUD} caracteres.")

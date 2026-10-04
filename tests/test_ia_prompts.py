@@ -214,3 +214,34 @@ def test_el_sistema_fija_las_reglas_basicas() -> None:
     assert "bases reguladoras" in SISTEMA
     assert "instrumental" in SISTEMA
     assert "«(y N más)» está incompleta" in SISTEMA
+
+
+# --- Fichas reales ----------------------------------------------------------
+
+# Cuatro formas distintas de convocatoria, todas reales (tests/fixtures/bdns/):
+# instrumental local, instrumental estatal con plazo futuro, competitiva abierta
+# y directa canónica con el plazo en texto y 21 sectores.
+CODIGOS_REALES = ["900000", "933205", "933277", "933305"]
+# Con el perfil al máximo, la llamada más grande de estas fichas ronda los 8.000
+# caracteres (unos 2.000 tokens). El tope deja margen y avisa si algo se dispara.
+MAX_CARACTERES_PETICION = 12_000
+PERFIL_AL_MAXIMO = replace(
+    PERFIL, descripcion="x" * 5000, palabras_clave=tuple(f"palabra{numero}" for numero in range(50))
+)
+
+
+@pytest.mark.parametrize("codigo", CODIGOS_REALES)
+def test_las_fichas_reales_dan_peticiones_completas_y_acotadas(codigo: str) -> None:
+    ficha = ficha_bdns(codigo)
+    peticiones = [
+        peticion_resumen(ficha),
+        peticion_requisitos(ficha),
+        peticion_idoneidad(ficha, PERFIL_AL_MAXIMO, hoy=HOY),
+    ]
+
+    for peticion in peticiones:
+        assert f"Código BDNS: {codigo}" in peticion.mensaje
+        assert "Título: no consta" not in peticion.mensaje
+        # Ningún campo vacío se cuela como "None".
+        assert "None" not in peticion.mensaje
+        assert len(peticion.sistema) + len(peticion.mensaje) <= MAX_CARACTERES_PETICION

@@ -8,6 +8,10 @@ y no contra la que suponemos:
 - `detalle_900000.json`: plazo con fechas, sin reglamento.
 - `detalle_933305.json`: plazo en texto ("Día siguiente a la publicación en
   DOE"), reglamento de minimis y 21 sectores.
+
+Hay dos más, que usan los tests de los prompts: `detalle_933205.json`
+(instrumental estatal con plazo futuro) y `detalle_933277.json` (concurrencia
+competitiva abierta).
 """
 
 import json
