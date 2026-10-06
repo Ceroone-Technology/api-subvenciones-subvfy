@@ -254,3 +254,30 @@ Decisiones cerradas con el usuario:
 
 **Gotcha ya pagado**: añadir el `alerta_id` NOT NULL rompió dos tests anteriores que insertaban en la tabla puente sin él (`test_alerta_ejecuciones.py` y `test_alertas.py`). Si escribes en esa tabla, el `alerta_id` va siempre.
 
+
+## Notificaciones de alertas (desde Hito 4, Funcionalidad 3)
+
+Decisiones cerradas con el usuario — no las reabras sin preguntar:
+
+- **Proveedor: Amazon SES**, por coherencia con el despliegue en AWS ya decidido. `EMAIL_BACKEND` elige entre `consola` (por defecto, solo log) y `ses`. El defecto es `consola` para que ningún entorno mande correo real por descuido.
+- **Los enlaces del correo llevan a la ficha dentro de Subvfy**, no al portal de la BDNS: el aviso devuelve al usuario al producto. Las rutas son configurables (`FRONTEND_RUTA_*`) porque **no se han contrastado con el routing real del Angular** — el frontend no estaba en la máquina. Verifícalas antes de enviar nada en producción.
+- **HTML con marca + alternativa en texto plano**, siempre las dos partes.
+- **Destinatario: el dueño de la alerta** (`alerta.usuario_id`). Las alertas son personales, como los favoritos.
+
+**La costura con el motor (decidida al integrar las dos ramas)**: `enviar_aviso` **no registra nada**. Quien crea la `alerta_ejecucion`, deduplica y enlaza las convocatorias es `registrar_ejecucion` (motor, `app/services/deduplicacion_alertas.py`), que la deja en `pendiente_envio`. Este servicio recoge ese testigo, manda el correo y la cierra en `enviado` o `error`. Se llegó aquí porque las dos ramas habían escrito su propio registro de ejecución: el del motor es el bueno, porque tiene la deduplicación entre ejecuciones y el `UNIQUE` que la respalda. **No vuelvas a crear ejecuciones desde el envío.**
+
+Cuatro invariantes que sostienen los tests y conviene no romper:
+
+- **`pendiente_envio` es la cola.** `enviar_aviso` ignora cualquier ejecución en otro estado, así que llamarla dos veces sobre una ya enviada no manda un segundo correo (`test_avisar_dos_veces_no_manda_dos_correos`).
+- **Un fallo de envío no se propaga y tampoco cierra la ejecución**: se queda en `pendiente_envio` con el motivo en `detalle_error`. No se relanza porque `evaluar_alerta` llama a `enviar_aviso` dentro del ciclo y un SES caído tumbaría la pasada entera.
+- **`error` no lo escribe el envío, y esto es una decisión, no un descuido** (`test_el_estado_error_no_lo_escribe_el_envio`). Ese estado significa una sola cosa: la ejecución no llegó a término, y lo pone el motor. Usarlo también para "se ejecutó bien pero el correo no salió" daría dos significados opuestos a la misma columna: en el primer caso las convocatorias **no** se registraron y volverán a encontrarse; en el segundo **sí**, y no se volverían a anunciar nunca. Una ejecución en `pendiente_envio` con `detalle_error` nulo es que aún no se ha intentado; con texto, que se intentó y falló, y `updated_at` dice cuándo.
+- **Un fallo de envío no provoca un re-aviso duplicado.** Las convocatorias ya las registró el motor antes de intentarlo, así que no reaparecen como novedad en el ciclo siguiente (`test_un_fallo_de_envio_no_hace_que_se_re_avise`). Lo que sí puede ocurrir es reintentar **esa misma ejecución**, que sigue en la cola (`test_un_aviso_fallido_puede_reintentarse`).
+- **Una cuenta no activa deja el aviso en la cola, no en silencio.** Si alguien deja de recibir avisos por estar bloqueado tiene que verse en el historial, y el aviso debe poder salir cuando se reactive.
+
+**Pendiente, y es trabajo aparte**: **nadie barre la cola**. El ciclo llama a `enviar_aviso` con la ejecución que acaba de crear, no con las `pendiente_envio` atrasadas, así que un aviso fallido queda visible pero no se reenvía solo. El modelo de datos ya lo soporta; falta el mecanismo, y el sitio natural es el motor, junto al escalado de reintentos que introduce el PR #7.
+
+**`enviar()` es síncrono a propósito** (boto3 bloquea y no tiene versión async); el servicio lo saca del event loop con `asyncio.to_thread`. No lo envuelvas en una corrutina falsa.
+
+**Firma de auditoría**: las filas que escribe el motor llevan `created_by`/`updated_by` del usuario de sistema, vía `app/services/sistema.py`. Es justo para lo que se sembró en `b7f3c21a9d40`. Cualquier proceso automático futuro (sync BDNS, análisis IA en batch) debe usar `id_usuario_sistema()` en vez de inventarse un autor.
+
+**Pendiente de infraestructura, no de código**: verificar el dominio del remitente en SES (SPF/DKIM) y sacar la cuenta del sandbox, donde solo se puede escribir a direcciones verificadas.
