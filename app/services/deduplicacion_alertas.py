@@ -17,15 +17,23 @@ alerta no pueden registrar la misma novedad dos veces.
 algo falla a mitad, no queda nada marcado como visto. Lo contrario perdería un
 resultado para siempre, porque en el ciclo siguiente ya no aparecería como
 nuevo.
+
+**Y el fallo se registra aparte** (`registrar_fallo`): ese rollback se lleva
+también la fila de `alerta_ejecucion`, así que dejar constancia del error
+exige una transacción nueva, después del rollback. Sin ella la alerta no
+dejaba rastro y se reintentaba en cada ciclo.
 """
 
 import logging
 from collections.abc import Sequence
+from datetime import datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as insert_postgresql
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models import Alerta, AlertaEjecucion, AlertaEjecucionConvocatoria, Convocatoria
 from app.services.bdns_cliente import ConvocatoriaBdns
 from app.services.bdns_consulta import NIVEL_A_TIPO_ADMINISTRACION
@@ -121,6 +129,102 @@ async def filtrar_nuevas(
     ]
 
 
+# Tope de `detalle_error`. La columna es TEXT, pero esto se sirve por la API y
+# un mensaje de error no necesita más.
+MAX_DETALLE_ERROR = 500
+# Con un exponente mayor el timedelta desbordaría antes de que lo frene el tope.
+_MAX_EXPONENTE_ESPERA = 20
+
+
+def espera_reintento(fallos_consecutivos: int) -> timedelta:
+    """Cuánto esperar tras el n-ésimo fallo seguido: base × 2^(n-1), con tope.
+
+    Con los valores por defecto: 15 min, 30 min, 1 h, 2 h… hasta 24 h.
+    """
+    base = timedelta(minutes=settings.alertas_reintento_base_minutos)
+    tope = timedelta(hours=settings.alertas_reintento_max_horas)
+    exponente = min(max(fallos_consecutivos - 1, 0), _MAX_EXPONENTE_ESPERA)
+    return min(base * 2**exponente, tope)
+
+
+def detalle_de_error(error: BaseException) -> str:
+    """Texto de `alerta_ejecucion.detalle_error`: clase y primera línea del
+    mensaje, truncado.
+
+    **Nunca `str(error)` a secas**: en un `DBAPIError` de SQLAlchemy incluye la
+    sentencia y sus parámetros, es decir, datos de la BDNS, y este campo se
+    devuelve por la API. Se usa el mensaje de la excepción del driver
+    (`orig`), que no los lleva. El prefijo distingue un fallo de ejecución de
+    uno de envío, que también usará el estado `error`.
+    """
+    causa = error.orig if isinstance(error, DBAPIError) and error.orig is not None else error
+    lineas = str(causa).strip().splitlines()
+    mensaje = lineas[0].strip() if lineas else ""
+    return f"[ejecución] {type(error).__name__}: {mensaje}"[:MAX_DETALLE_ERROR]
+
+
+async def registrar_fallo(
+    db: AsyncSession,
+    alerta_id: int,
+    error: BaseException,
+    *,
+    usuario_sistema_id: int,
+    ahora: datetime,
+) -> AlertaEjecucion | None:
+    """Deja constancia de una ejecución fallida, en **su propia transacción**.
+
+    Hay que llamarla **después** del `rollback` de la ejecución que falló: el
+    rollback deshace todo lo que hubiera en la transacción, y esta es la que
+    sobrevive. Escribe la fila `alerta_ejecucion` con estado `error` y su
+    detalle, sube `fallos_consecutivos` y fija `proximo_reintento_at`.
+
+    `ahora` es **el momento del fallo**, no el inicio del ciclo: un lote con
+    la BDNS caída puede durar más que la primera espera, y contarla desde el
+    inicio dejaría la marca vencida al escribirla.
+
+    **No toca `ultima_ejecucion_at`**: es el `desde` de la consulta a la BDNS,
+    y avanzarlo perdería lo publicado entre el fallo y el reintento.
+
+    Devuelve `None` si la alerta ya no existe (la borraron durante el ciclo).
+    """
+    # El contador sube en SQL y no desde el objeto de la alerta: esa instancia
+    # está desprendida de la sesión y puede llevar un valor viejo.
+    fallos = (
+        await db.execute(
+            update(Alerta)
+            .where(Alerta.id == alerta_id)
+            .values(
+                fallos_consecutivos=Alerta.fallos_consecutivos + 1,
+                updated_at=func.now(),
+                updated_by=usuario_sistema_id,
+            )
+            .returning(Alerta.fallos_consecutivos)
+            .execution_options(synchronize_session=False)
+        )
+    ).scalar_one_or_none()
+    if fallos is None:
+        await db.rollback()
+        return None
+
+    await db.execute(
+        update(Alerta)
+        .where(Alerta.id == alerta_id)
+        .values(proximo_reintento_at=ahora + espera_reintento(fallos))
+        .execution_options(synchronize_session=False)
+    )
+    ejecucion = AlertaEjecucion(
+        alerta_id=alerta_id,
+        convocatorias_encontradas=0,
+        estado_envio="error",
+        detalle_error=detalle_de_error(error),
+        created_by=usuario_sistema_id,
+        updated_by=usuario_sistema_id,
+    )
+    db.add(ejecucion)
+    await db.commit()
+    return ejecucion
+
+
 async def registrar_ejecucion(
     db: AsyncSession,
     alerta: Alerta,
@@ -168,8 +272,9 @@ def _recortar(valor: str | None, limite: int, *, codigo_bdns: str | None = None,
 
     Postgres **no recorta**: aborta la sentencia. Y como el registro va en una
     sola transacción, ese error se llevaría por delante la fila de
-    `alerta_ejecucion`, dejaría `ultima_ejecucion_at` sin avanzar y la alerta
-    fallaría en bucle en cada ciclo. De ahí que se recorte aquí.
+    `alerta_ejecucion` y haría fallar la ejecución entera (que el motor
+    registra y reintenta con espera, pero sin novedades mientras dure). De ahí
+    que se recorte aquí.
     """
     if not valor:
         return None

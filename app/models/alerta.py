@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, String
+from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -39,3 +39,8 @@ class Alerta(Base, AuditMixin):
     )
     activa: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     ultima_ejecucion_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Reintentos del motor. No se reutiliza `ultima_ejecucion_at`: es el punto
+    # desde el que se pregunta a la BDNS, y avanzarlo con un fallo haría perder
+    # lo publicado entre medias.
+    fallos_consecutivos: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    proximo_reintento_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

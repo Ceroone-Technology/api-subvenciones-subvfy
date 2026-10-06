@@ -16,8 +16,14 @@ consulta**. No se deriva de `alerta_ejecucion`, que sería un MAX por alerta, y
 no hay columna de próxima ejecución que mantener.
 
 **Aislamiento**: si una alerta revienta, se registra con traza y se sigue con
-las demás. Su `ultima_ejecucion_at` **no** avanza, así que el siguiente ciclo
-la reintenta.
+las demás. Su `ultima_ejecucion_at` **no** avanza (es el `desde` de la consulta
+a la BDNS: avanzarlo perdería lo publicado entre medias).
+
+**Un fallo deja rastro y no se reintenta a ciegas**: tras el rollback se
+escribe, en una transacción aparte, una fila `alerta_ejecucion` con estado
+`error`, y la alerta espera antes de volver a tocar (`proximo_reintento_at`:
+15 min, 30 min, 1 h… con tope de 24 h), contada desde el momento del fallo y
+no desde el inicio del ciclo. Un éxito, o editar la alerta, reinicia la espera.
 """
 
 import logging
@@ -32,7 +38,7 @@ from app.config import settings
 from app.models import Alerta, AlertaOrgano, AlertaRegion
 from app.services.bdns_cliente import ClienteBdns
 from app.services.bdns_consulta import construir_consulta
-from app.services.deduplicacion_alertas import filtrar_nuevas, registrar_ejecucion
+from app.services.deduplicacion_alertas import filtrar_nuevas, registrar_ejecucion, registrar_fallo
 from app.services.notificaciones import enviar_aviso
 
 logger = logging.getLogger(__name__)
@@ -148,6 +154,8 @@ async def alertas_pendientes(
                 Alerta.activa.is_(True),
                 # Nunca ejecutada, o vencida según su frecuencia.
                 or_(Alerta.ultima_ejecucion_at.is_(None), *vencidas),
+                # Y fuera de la espera de un fallo anterior.
+                or_(Alerta.proximo_reintento_at.is_(None), Alerta.proximo_reintento_at <= ahora),
             )
             .order_by(Alerta.ultima_ejecucion_at.asc().nulls_first(), Alerta.id)
             .limit(limite)
@@ -167,15 +175,18 @@ async def procesar_alertas_pendientes(
     *,
     usuario_sistema_id: int,
     evaluador: Evaluador | None = None,
-    ahora: datetime | None = None,
+    reloj: Callable[[], datetime] | None = None,
 ) -> ResumenCiclo:
     """Un ciclo del motor: selecciona, evalúa una a una y marca lo hecho.
 
-    `evaluador` existe para que los tests puedan inyectar un doble; en
-    producción es `evaluar_alerta`.
+    `evaluador` y `reloj` existen para que los tests puedan inyectar dobles;
+    en producción son `evaluar_alerta` y `datetime.now(UTC)`. El reloj se
+    consulta una vez al empezar (selección y marca de las que salen bien,
+    coherentes en todo el lote) y otra en cada fallo (su espera).
     """
     evaluar = evaluador or evaluar_alerta
-    ahora = ahora or datetime.now(UTC)
+    reloj = reloj or _ahora_utc
+    ahora = reloj()
     pendientes = await alertas_pendientes(db, ahora=ahora)
     logger.info("Motor de alertas: %d alerta(s) pendientes.", len(pendientes))
 
@@ -184,15 +195,23 @@ async def procesar_alertas_pendientes(
     for alerta in pendientes:
         try:
             await evaluar(db, alerta, usuario_sistema_id)
-        except Exception:
+            # El marcado va dentro del try: si falla (la conexión se cae), es
+            # un fallo más de la alerta, con su fila de error y su espera, y
+            # no corta el resto del lote.
+            await _marcar_ejecutada(db, alerta.id, usuario_sistema_id, ahora)
+        except Exception as error:
+            # La espera se cuenta desde el fallo, no desde el inicio del
+            # ciclo: con la BDNS caída cada alerta agota su timeout, el lote
+            # dura más que la primera espera y las marcas nacerían vencidas.
+            momento_fallo = reloj()
             # Aislamiento entre alertas: el fallo de una no puede tumbar el
             # ciclo. Se loguea con traza y con el id (nada de datos del
             # usuario), y se deja la sesión limpia para la siguiente.
             fallidas += 1
             logger.exception("Motor de alertas: falló la alerta %s; se continúa con las demás.", alerta.id)
             await db.rollback()
+            await _registrar_fallo(db, alerta.id, error, usuario_sistema_id, momento_fallo)
             continue
-        await _marcar_ejecutada(db, alerta.id, usuario_sistema_id, ahora)
         evaluadas += 1
 
     resumen = ResumenCiclo(pendientes=len(pendientes), evaluadas=evaluadas, fallidas=fallidas)
@@ -202,16 +221,39 @@ async def procesar_alertas_pendientes(
     return resumen
 
 
+def _ahora_utc() -> datetime:
+    return datetime.now(UTC)
+
+
+async def _registrar_fallo(
+    db: AsyncSession, alerta_id: int, error: BaseException, usuario_sistema_id: int, ahora: datetime
+) -> None:
+    """Deja constancia del fallo sin poder tumbar el ciclo: si registrarlo
+    también falla (la base de datos caída, por ejemplo), se loguea y se sigue
+    con la siguiente alerta."""
+    try:
+        await registrar_fallo(db, alerta_id, error, usuario_sistema_id=usuario_sistema_id, ahora=ahora)
+    except Exception:
+        logger.exception("Motor de alertas: no se pudo registrar el fallo de la alerta %s.", alerta_id)
+        await db.rollback()
+
+
 async def _marcar_ejecutada(
     db: AsyncSession, alerta_id: int, usuario_sistema_id: int, ahora: datetime
 ) -> None:
     """Commit por alerta: si el ciclo se corta a la mitad, lo ya hecho no se
     repite. Firma con el usuario de sistema, como el resto de procesos
-    automáticos."""
+    automáticos. Un éxito también borra la espera de los fallos anteriores."""
     await db.execute(
         update(Alerta)
         .where(Alerta.id == alerta_id)
-        .values(ultima_ejecucion_at=ahora, updated_at=func.now(), updated_by=usuario_sistema_id)
+        .values(
+            ultima_ejecucion_at=ahora,
+            fallos_consecutivos=0,
+            proximo_reintento_at=None,
+            updated_at=func.now(),
+            updated_by=usuario_sistema_id,
+        )
         # Sin sincronizar la sesión: por defecto este UPDATE expira los
         # atributos de las alertas ya cargadas, y leer la siguiente del bucle
         # dispararía una recarga perezosa que en async revienta

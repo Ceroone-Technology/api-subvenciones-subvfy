@@ -122,13 +122,14 @@ alembic upgrade head          # aplica todo lo que falte (esquema + seed)
 alembic revision --autogenerate -m "descripción del cambio"   # para el siguiente cambio
 ```
 
-El esquema de `schema-subvfy.sql` ya está implementado en `app/models/` (14 tablas) y aplicado en dos migraciones:
+El esquema de `schema-subvfy.sql` ya está implementado en `app/models/` (14 tablas) y aplicado en estas migraciones:
 
 - `827c98b6a656_esquema_inicial_subvfy.py` — las 14 tablas, constraints e índices. Las FK de auditoría con dependencia circular (rol/empresa/usuario, vía `created_by`/`updated_by`) se añaden con `op.create_foreign_key()` al final de `upgrade()` — `use_alter=True` dentro de `create_table()` no genera el `ALTER TABLE` por sí solo en Alembic, hay que añadirlo explícito (y su `drop_constraint` correspondiente al inicio de `downgrade()`).
 - `0db12626fe94_seed_catalogo_de_roles.py` — siembra el catálogo de roles (`admin`, `gestor`, `usuario`).
 - `b7f3c21a9d40_seed_empresa_y_usuario_de_sistema.py` — siembra la identidad interna de auditoría para procesos automáticos.
 - `e4a19c7d2b58_indices_de_filtros_de_alerta.py` — índices por `organo_bdns_id`/`region_bdns_id` para la búsqueda inversa del motor de alertas.
 - `d8c5e0cf33c8_dedup_de_convocatorias_notificadas_por_.py` — `alerta_ejecucion_convocatoria.alerta_id` con `UNIQUE(alerta_id, convocatoria_id)` (la base de datos garantiza que una convocatoria no se notifica dos veces a la misma alerta) y el estado `pendiente_envio`.
+- `a3f9d27c51b8_reintentos_del_motor_de_alertas.py` — `alerta.fallos_consecutivos` y `alerta.proximo_reintento_at`: cuántas ejecuciones seguidas han fallado y hasta cuándo no se vuelve a intentar la alerta.
 
 Verificado con `alembic upgrade head` → `alembic downgrade base` → `alembic upgrade head` sin errores, contra un PostgreSQL real.
 
@@ -252,8 +253,9 @@ Cada vez que el motor de alertas evalúa una alerta deja una fila en
   Una ejecución de otra alerta, aunque sea tuya, responde 404.
 
 Lo escribe el motor de alertas en cada ciclo: `pendiente_envio` cuando hay
-novedades y `sin_novedades` cuando no. `enviado` llegará con la funcionalidad de
-notificación por correo.
+novedades, `sin_novedades` cuando no y `error` cuando la ejecución falló (con el
+motivo en `detalle_error`, que empieza por `[ejecución]`). `enviado` llegará con
+la funcionalidad de notificación por correo.
 - **Órganos y regiones se filtran por id del catálogo de la BDNS**, no por
   texto: el frontend ya tiene esos ids porque consulta la BDNS. Se guardan
   normalizados (una fila por id en `alerta_organo`/`alerta_region`, sin
@@ -286,9 +288,15 @@ invocando una Lambda, con el mismo servicio de dominio
 
 Cada ciclo selecciona las alertas **activas** a las que toca evaluarse —según su
 `frecuencia` y su `ultima_ejecucion_at`— y las recorre una a una. Si una falla,
-se registra en el log y se sigue con las demás; como su `ultima_ejecucion_at` no
-avanza, el ciclo siguiente la reintenta. `frecuencia: "inmediata"` significa
+se registra en el log y se sigue con las demás. `frecuencia: "inmediata"` significa
 "en cada ciclo", así que su cadencia real es el intervalo configurado.
+
+**Una ejecución fallida deja rastro y no se reintenta a ciegas.** Se guarda una fila
+en el historial con estado `error` y el motivo (recortado, sin datos de la BDNS), y
+la alerta espera antes de volver a intentarlo: 15 minutos la primera vez, el doble
+en cada fallo seguido y 24 horas como máximo. Un éxito, o editar la alerta, borra
+la espera. Un fallo no avanza `ultima_ejecucion_at`, porque es la fecha desde la
+que se consulta la BDNS: así no se pierde lo publicado mientras la alerta fallaba.
 
 Cada ciclo **consulta la BDNS** con los criterios de la alerta (texto, nivel de
 administración, órganos, regiones y fechas), se queda **solo con lo que esa
@@ -299,7 +307,7 @@ La deduplicación es **por alerta**, no por usuario: la misma convocatoria puede
 ser novedad para dos alertas distintas. Que no se repita lo garantiza la propia
 base de datos, con un `UNIQUE(alerta_id, convocatoria_id)`, así que ni dos
 ciclos a la vez cuentan dos veces la misma novedad. Si el registro falla a
-mitad, no queda nada marcado como visto y el ciclo siguiente lo vuelve a
+mitad, no queda nada marcado como visto y, pasada la espera, el motor lo vuelve a
 encontrar.
 
 Detalles de la consulta: los ids de órgano y región se envían repetidos en una
@@ -307,7 +315,7 @@ sola petición (la BDNS los acumula), `solo_mrr` se filtra en cliente porque la
 API no tiene ese parámetro, y una alerta **sin ningún criterio** se rechaza en
 lugar de traer la base entera.
 
-Se configura con dos variables (ver `.env.example`):
+Se configura con estas variables (ver `.env.example`):
 
 ```bash
 SCHEDULER_HABILITADO=false      # desactivado por defecto: en tests no debe arrancar
@@ -319,6 +327,9 @@ BDNS_TIMEOUT_SEGUNDOS=10
 BDNS_TAMANO_PAGINA=100          # hasta 2.000 convocatorias por alerta y ciclo
 BDNS_MAX_PAGINAS=20
 BDNS_DIAS_PRIMERA_EJECUCION=7   # ventana la primera vez que se evalúa una alerta
+
+ALERTAS_REINTENTO_BASE_MINUTOS=15   # espera tras el primer fallo; se duplica en cada uno seguido
+ALERTAS_REINTENTO_MAX_HORAS=24      # tope de esa espera
 ```
 
 La BDNS es una API pública: no hace falta credencial. Si trabajas en Windows con
@@ -435,9 +446,10 @@ El desarrollo se organiza como Hito → Funcionalidad → Tarea en `api-hitos-fu
 - Hito 2, Funcionalidad 3 — API de empresa/rol/usuario: **hecho** (schemas Pydantic + CRUD paginado + hashing de contraseñas).
 - Hito 2, Funcionalidad 4 — Autenticación real (JWT): **hecho** (login/refresh/logout/me, autorización por rol, aislamiento multi-tenant, 70 tests contra Postgres real).
 - Hito 3, Funcionalidad 1 — Endpoints de favoritos: **hecho** (marcar/quitar, listado con join a convocatoria, nota personal, 85 tests contra Postgres real).
+- Hito 4 — Ejecuciones fallidas de alerta visibles y con reintentos espaciados: **hecho** (fila `error` en el historial, espera creciente de 15 min a 24 h, migración `a3f9d27c51b8`; 255 tests contra Postgres real).
 - Hito 4 — Motor de ejecución de alertas (tarea 3 de 3, deduplicación y registro): **hecho** (dedup por alerta con garantía de base de datos, registro transaccional del historial y migración `d8c5e0cf33c8`; 229 tests contra Postgres real). Pendiente el envío del aviso.
 - Hito 4 — Motor de ejecución de alertas (tarea 2 de 3, consulta a la BDNS): **hecho** (constructor puro de la consulta + cliente HTTP con topes y timeouts; 219 tests contra Postgres real, el cliente con MockTransport). Pendiente el registro del historial.
 - Hito 4 — Motor de ejecución de alertas (tarea 1 de 3, job programado): **hecho** (selección por frecuencia, ciclo con aislamiento de fallos, APScheduler en el lifespan; 185 tests contra Postgres real). Pendientes la consulta a la BDNS y el registro del historial.
 - Hito 4, Funcionalidad 1 — CRUD de alertas: **hecho** (crear/editar/eliminar, filtros de órgano y región normalizados por id BDNS).
 - Hito 4 — Listado y detalle de alertas: **hecho** (paginado, filtros por órgano/región/activa, sin N+1, 142 tests contra Postgres real).
-- Hito 4 — Historial de ejecuciones por alerta: **hecho** (solo lectura; 159 tests contra Postgres real). El motor que escribe las ejecuciones sigue pendiente.
+- Hito 4 — Historial de ejecuciones por alerta: **hecho** (solo lectura; 159 tests contra Postgres real). Las ejecuciones las escribe el motor de alertas (tarea 3).
