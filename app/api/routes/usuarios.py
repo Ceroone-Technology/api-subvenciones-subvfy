@@ -2,16 +2,26 @@
 
 Permisos (ver `app.core.permisos` para el modelo completo):
 
-| Acción             | admin | gestor              | usuario                  |
-|--------------------|-------|---------------------|--------------------------|
-| Listar / consultar | todos | los de su empresa   | los de su empresa        |
-| Crear              | sí    | en su empresa       | no                       |
-| Editar             | sí    | los de su empresa   | solo su propio perfil    |
-| Dar de baja        | sí    | los de su empresa   | no                       |
+| Acción             | admin | gestor                              | usuario               |
+|--------------------|-------|-------------------------------------|-----------------------|
+| Listar / consultar | todos | los de su empresa                   | los de su empresa     |
+| Crear              | sí    | en su empresa, con rol `usuario`    | no                    |
+| Editar             | sí    | los de rol `usuario` de su empresa  | solo su propio perfil |
+| Dar de baja        | sí    | los de rol `usuario` de su empresa  | no                    |
 
-Un `usuario` editando su propio perfil no puede tocar `empresa_id`,
-`rol_id` ni `estado`: son justo los campos con los que se ascendería a sí
-mismo o se cambiaría de tenant.
+Tres reglas que cierran la escalada que encontró la auditoría del 06/10, y que
+viven en `app.core.permisos` para que el criterio esté en un solo sitio:
+
+- **`rol_id` y `empresa_id` son solo de admin**, ni siquiera con el valor que ya
+  tenían: repartir roles y mover gente entre empresas no es cosa del gestor.
+- **Un gestor no gestiona a un admin ni a otro gestor** de su empresa, tampoco
+  su contraseña. Si no, compartir empresa con un admin bastaba para tomar su
+  cuenta.
+- **Nadie se cambia su propio rol ni su propio estado**, ni se da de baja a sí
+  mismo (403). Un `usuario` editando su perfil sigue sin poder tocar
+  `empresa_id`, `rol_id` ni `estado`.
+
+El orden de comprobación es tenant primero (404) y rol después (403).
 
 Dos reglas propias de este recurso:
 
