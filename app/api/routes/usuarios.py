@@ -147,10 +147,12 @@ async def crear_usuario(datos: UsuarioCreate, db: DbDep, actual: GestorDep) -> U
     actual.exigir_acceso_a_empresa(datos.empresa_id)
     rol = await _exigir_referencias_validas(db, datos.empresa_id, datos.rol_id)
     # Y solo admin reparte roles de gestión: si no, un gestor se crearía un
-    # admin y entraría con él. `rol` nunca es None aquí (`rol_id` es
-    # obligatorio en UsuarioCreate), pero se comprueba en vez de afirmarlo.
-    if rol is not None:
-        actual.exigir_rol_asignable(rol.codigo)
+    # admin y entraría con él. `rol` no puede ser None (`rol_id` es obligatorio
+    # en UsuarioCreate), pero si algún día dejara de serlo, el alta falla en
+    # cerrado en vez de saltarse la comprobación del rol.
+    if rol is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Hay que indicar el rol del usuario.")
+    actual.exigir_rol_asignable(rol.codigo)
     await _exigir_email_libre(db, datos.email)
 
     campos = datos.model_dump(exclude={"password"})
