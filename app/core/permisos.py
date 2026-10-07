@@ -5,8 +5,26 @@ El modelo de permisos acordado, sobre los tres roles del catálogo:
 | Rol       | Alcance                                                       |
 |-----------|---------------------------------------------------------------|
 | `admin`   | Global: cualquier empresa y cualquier usuario.                |
-| `gestor`  | Lectura y escritura, pero solo dentro de su propia empresa.   |
+| `gestor`  | Su empresa, y solo sobre usuarios con rol `usuario`.          |
 | `usuario` | Lee su empresa y edita únicamente su propio perfil.           |
+
+Sobre el recurso `usuario` hay tres reglas más, que cierran la escalada de
+privilegios de la auditoría del 06/10 (AUD-001 y AUD-002):
+
+- **`rol_id` y `empresa_id` son solo de admin.** Un gestor que los envíe
+  recibe 403, aunque sea su propia empresa o el valor que ya tenía: quien
+  puede repartir roles o mover gente entre empresas es admin y nadie más.
+- **Un gestor gestiona objetivos con rol `usuario`**, más su propio perfil.
+  Sobre un admin o otro gestor de su empresa recibe 403, contraseña
+  incluida; si no, bastaba con compartir empresa con un admin para cambiarle
+  la contraseña y entrar con ella.
+- **Nadie se cambia su propio rol ni su propio estado**, admin incluido, ni
+  se da de baja a sí mismo. Si el único admin se degrada o se bloquea, ya no
+  hay quien lo arregle por la API.
+
+El orden de comprobación importa: **primero el tenant, después el rol**. Un
+objetivo de otra empresa da 404 sin mirar su rol, porque un 403 confirmaría
+que ese id existe.
 
 La regla transversal, y la que de verdad importa en un producto B2B
 multi-tenant: **nadie que no sea admin ve datos de otra empresa**. Los
@@ -15,7 +33,7 @@ el filtro a la empresa del token (`filtro_empresa`), para que un fallo al
 añadir un endpoint nuevo no se traduzca en una fuga entre clientes.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -31,6 +49,14 @@ from app.models import Rol, Usuario
 ROL_ADMIN = "admin"
 ROL_GESTOR = "gestor"
 ROL_USUARIO = "usuario"
+
+# Campos del recurso `usuario` con dueño: `CAMPOS_SOLO_ADMIN` reparte
+# privilegios y tenants, así que no los toca ningún gestor;
+# `CAMPOS_PROPIOS_BLOQUEADOS` son los que nadie puede cambiarse a sí mismo; y
+# `CAMPOS_DE_GESTION` es lo que no puede tocarse quien no gestiona a nadie.
+CAMPOS_SOLO_ADMIN = ("rol_id", "empresa_id")
+CAMPOS_PROPIOS_BLOQUEADOS = ("rol_id", "estado")
+CAMPOS_DE_GESTION = ("empresa_id", "rol_id", "estado")
 
 # auto_error=False para poder devolver siempre el mismo 401 con cabecera
 # WWW-Authenticate, tanto si falta la cabecera como si el token es inválido.
@@ -73,6 +99,62 @@ class UsuarioAutenticado:
         de la de un id inexistente."""
         if not self.puede_ver_empresa(empresa_id):
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Empresa no encontrada.")
+
+    def exigir_gestion_de(self, objetivo_id: int, rol_objetivo: str) -> None:
+        """¿Puede el usuario actual gestionar a este otro usuario?
+
+        El tenant lo comprueba antes quien llama (`exigir_acceso_a_empresa`),
+        así que aquí solo queda el rol. Un admin gestiona a cualquiera; un
+        gestor, solo a usuarios con rol `usuario`; el propio perfil siempre se
+        permite, y los campos que puede tocar los decide
+        `exigir_campos_permitidos`.
+        """
+        if self.es_admin or objetivo_id == self.id:
+            return
+        if rol_objetivo != ROL_USUARIO:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail=f"No puedes gestionar a un usuario con rol '{rol_objetivo}'.",
+            )
+
+    def exigir_rol_asignable(self, rol_codigo: str) -> None:
+        """Qué rol puede asignar al crear o editar. Solo admin reparte roles de
+        gestión: si no, un gestor podría crearse un admin y entrar con él."""
+        if not self.es_admin and rol_codigo != ROL_USUARIO:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail=f"Solo un admin puede asignar el rol '{rol_codigo}'.",
+            )
+
+    def exigir_campos_permitidos(self, campos: Iterable[str], *, objetivo_id: int) -> None:
+        """403 nombrando los campos que no puede tocar, para que el cliente
+        sepa qué quitar del body.
+
+        Se decide por **presencia**, no por valor: reenviar `rol_id` con el
+        que ya tiene también se rechaza. Es la semántica de un PATCH, y evita
+        que el permiso dependa del estado de la fila.
+        """
+        enviados = set(campos)
+        prohibidos: set[str] = set()
+        if not self.es_admin:
+            prohibidos |= enviados & set(CAMPOS_SOLO_ADMIN)
+            if self.rol != ROL_GESTOR:
+                prohibidos |= enviados & set(CAMPOS_DE_GESTION)
+        if objetivo_id == self.id:
+            prohibidos |= enviados & set(CAMPOS_PROPIOS_BLOQUEADOS)
+        if prohibidos:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail=f"No puedes modificar estos campos: {', '.join(sorted(prohibidos))}.",
+            )
+
+    def exigir_no_es_uno_mismo(self, objetivo_id: int) -> None:
+        """Para la baja: nadie se da de baja a sí mismo. Antes era un 409; es
+        un 403 porque lo que falla es el permiso, no un conflicto de estado."""
+        if objetivo_id == self.id:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, detail="No puedes darte de baja a ti mismo."
+            )
 
     @property
     def filtro_empresa(self) -> int | None:
