@@ -12,6 +12,7 @@ from app.config import settings
 from app.core.security import TIPO_ACCESS, crear_access_token, crear_refresh_token
 from app.database import AsyncSessionLocal
 from app.models import Usuario
+from app.services.sistema import EMAIL_SISTEMA
 from tests.conftest import PASSWORD_TEST, Sesion, crear_sesion_en_bd
 
 
@@ -126,6 +127,27 @@ async def test_login_de_cuenta_bloqueada(client: AsyncClient, empresa: dict) -> 
     )
     assert respuesta.status_code == 403
     assert "bloqueado" in respuesta.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_la_cuenta_de_sistema_no_puede_iniciar_sesion(client: AsyncClient) -> None:
+    """`sistema@subvfy.es` (seed de `b7f3c21a9d40`) es la identidad de auditoría
+    de los procesos automáticos, no una cuenta de acceso: nace `bloqueado` y
+    con una contraseña aleatoria que se descarta.
+
+    Lo que se afirma es que no se puede entrar y que sigue bloqueada. El 401 y
+    no el 403 del estado es lo que corresponde: la contraseña falla antes, así
+    que ni siquiera se llega a decir que la cuenta existe.
+    """
+    respuesta = await client.post(
+        "/auth/login", json={"email": EMAIL_SISTEMA, "password": PASSWORD_TEST}
+    )
+    assert respuesta.status_code == 401
+    assert respuesta.json()["detail"] == "Email o contraseña incorrectos."
+
+    async with AsyncSessionLocal() as db:
+        estado = await db.scalar(select(Usuario.estado).where(Usuario.email == EMAIL_SISTEMA))
+    assert estado == "bloqueado", "la cuenta de sistema no debe quedar utilizable"
 
 
 @pytest.mark.asyncio
