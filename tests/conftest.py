@@ -245,6 +245,32 @@ async def usuario_raso(empresa: dict) -> Sesion:
     return await crear_sesion_en_bd(empresa["id"], "usuario")
 
 
+@pytest_asyncio.fixture
+async def admin_de_la_empresa(empresa: dict) -> Sesion:
+    """Un admin que **comparte empresa** con el gestor, al revés que la fixture
+    `admin`. Es el escenario que hacía invisible la escalada de AUD-002: si el
+    admin siempre vive en otra empresa, el gestor nunca lo tiene a tiro."""
+    return await crear_sesion_en_bd(empresa["id"], "admin")
+
+
+@pytest_asyncio.fixture
+async def otro_gestor(empresa: dict) -> Sesion:
+    """Segundo gestor en la misma empresa: un gestor no gestiona a sus pares."""
+    return await crear_sesion_en_bd(empresa["id"], "gestor")
+
+
+@pytest_asyncio.fixture
+async def rol_admin_id() -> int:
+    async with AsyncSessionLocal() as db:
+        return (await db.execute(select(Rol.id).where(Rol.codigo == "admin"))).scalar_one()
+
+
+@pytest_asyncio.fixture
+async def rol_gestor_id() -> int:
+    async with AsyncSessionLocal() as db:
+        return (await db.execute(select(Rol.id).where(Rol.codigo == "gestor"))).scalar_one()
+
+
 def _cliente_autenticado(sesion: Sesion) -> AsyncClient:
     transport = ASGITransport(app=app)
     return AsyncClient(transport=transport, base_url="http://test", headers=sesion.headers)

@@ -208,3 +208,158 @@ async def test_cualquier_autenticado_lee_el_catalogo_de_roles(client_usuario: As
     respuesta = await client_usuario.get("/roles")
     assert respuesta.status_code == 200
     assert len(respuesta.json()) == 3
+
+
+# --- Escalada de privilegios en usuarios (AUD-001 y AUD-002) --------------------
+#
+# Reglas acordadas en el ticket 1:
+#   - `rol_id` y `empresa_id` son solo de admin.
+#   - Un gestor gestiona únicamente objetivos con rol `usuario` de su empresa,
+#     más su propio perfil.
+#   - Nadie se cambia su propio rol ni su propio estado, admin incluido.
+#   - El tenant se comprueba antes que el rol: otra empresa da 404; el propio
+#     tenant con rol insuficiente, 403.
+
+
+@pytest.mark.asyncio
+async def test_un_gestor_no_se_cambia_el_rol(
+    client_gestor: AsyncClient, gestor: Sesion, rol_admin_id: int
+) -> None:
+    """La escalada de AUD-001: con el rol releído de la BD en cada petición,
+    un `rol_id` de admin aquí convertía al gestor en admin global."""
+    respuesta = await client_gestor.patch(f"/usuarios/{gestor.id}", json={"rol_id": rol_admin_id})
+    assert respuesta.status_code == 403
+    assert "rol_id" in respuesta.json()["detail"]
+
+    # Y sigue viendo solo su empresa.
+    assert (await client_gestor.get("/empresas")).json()["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_un_gestor_no_asciende_a_nadie(
+    client_gestor: AsyncClient, usuario_raso: Sesion, rol_admin_id: int, rol_gestor_id: int
+) -> None:
+    for rol_id in (rol_admin_id, rol_gestor_id):
+        respuesta = await client_gestor.patch(f"/usuarios/{usuario_raso.id}", json={"rol_id": rol_id})
+        assert respuesta.status_code == 403, f"rol_id={rol_id}: {respuesta.text}"
+
+
+@pytest.mark.asyncio
+async def test_un_gestor_no_toca_empresa_id_ni_la_suya(
+    client_gestor: AsyncClient, gestor: Sesion, usuario_raso: Sesion, empresa: dict, otra_empresa: dict
+) -> None:
+    """`empresa_id` es de admin: ni el propio ni el de otro, ni siquiera con el
+    valor que ya tienen."""
+    propio = await client_gestor.patch(f"/usuarios/{gestor.id}", json={"empresa_id": empresa["id"]})
+    ajeno = await client_gestor.patch(f"/usuarios/{usuario_raso.id}", json={"empresa_id": empresa["id"]})
+    assert propio.status_code == 403, propio.text
+    assert ajeno.status_code == 403, ajeno.text
+
+
+@pytest.mark.asyncio
+async def test_un_gestor_solo_crea_usuarios_rasos(
+    client_gestor: AsyncClient, empresa: dict, rol_admin_id: int, rol_gestor_id: int, rol_usuario_id: int
+) -> None:
+    for rol_id in (rol_admin_id, rol_gestor_id):
+        respuesta = await client_gestor.post("/usuarios", json=_payload_usuario(empresa["id"], rol_id))
+        assert respuesta.status_code == 403, f"rol_id={rol_id}: {respuesta.text}"
+
+    # El alta normal sigue funcionando.
+    valida = await client_gestor.post("/usuarios", json=_payload_usuario(empresa["id"], rol_usuario_id))
+    assert valida.status_code == 201, valida.text
+
+
+@pytest.mark.asyncio
+async def test_un_gestor_no_gestiona_al_admin_de_su_empresa(
+    client_gestor: AsyncClient, admin_de_la_empresa: Sesion, client: AsyncClient
+) -> None:
+    """AUD-002: el admin que comparte empresa con el gestor era editable por él,
+    contraseña incluida, lo que permitía tomar su cuenta."""
+    from tests.conftest import PASSWORD_TEST
+
+    editar = await client_gestor.patch(f"/usuarios/{admin_de_la_empresa.id}", json={"nombre": "Secuestrado"})
+    password = await client_gestor.patch(
+        f"/usuarios/{admin_de_la_empresa.id}", json={"password": "la-del-gestor-123"}
+    )
+    baja = await client_gestor.delete(f"/usuarios/{admin_de_la_empresa.id}")
+    assert editar.status_code == 403, editar.text
+    assert password.status_code == 403, password.text
+    assert baja.status_code == 403, baja.text
+
+    # Su cuenta sigue intacta: entra con su contraseña de siempre.
+    login = await client.post(
+        "/auth/login", json={"email": admin_de_la_empresa.email, "password": PASSWORD_TEST}
+    )
+    assert login.status_code == 200, "la contraseña del admin no debería haber cambiado"
+
+
+@pytest.mark.asyncio
+async def test_un_gestor_no_gestiona_a_otro_gestor(
+    client_gestor: AsyncClient, otro_gestor: Sesion
+) -> None:
+    editar = await client_gestor.patch(f"/usuarios/{otro_gestor.id}", json={"nombre": "Editado"})
+    baja = await client_gestor.delete(f"/usuarios/{otro_gestor.id}")
+    assert editar.status_code == 403, editar.text
+    assert baja.status_code == 403, baja.text
+
+
+@pytest.mark.asyncio
+async def test_un_admin_no_se_degrada_ni_se_bloquea(
+    client_admin: AsyncClient, admin: Sesion, rol_usuario_id: int
+) -> None:
+    """Autoprotección: si el único admin se degrada o se bloquea, ya no hay
+    quien lo arregle por la API."""
+    rol = await client_admin.patch(f"/usuarios/{admin.id}", json={"rol_id": rol_usuario_id})
+    estado = await client_admin.patch(f"/usuarios/{admin.id}", json={"estado": "bloqueado"})
+    baja = await client_admin.delete(f"/usuarios/{admin.id}")
+    assert rol.status_code == 403, rol.text
+    assert estado.status_code == 403, estado.text
+    assert baja.status_code == 403, baja.text
+
+
+@pytest.mark.asyncio
+async def test_un_gestor_de_otra_empresa_recibe_404_no_403(
+    admin_de_la_empresa: Sesion, otra_empresa: dict
+) -> None:
+    """El tenant se comprueba primero: un 403 confirmaría que ese id existe."""
+    forastero = await crear_sesion_en_bd(otra_empresa["id"], "gestor")
+    from httpx import ASGITransport
+
+    from app.main import app
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test", headers=forastero.headers
+    ) as cliente:
+        editar = await cliente.patch(f"/usuarios/{admin_de_la_empresa.id}", json={"nombre": "X"})
+        baja = await cliente.delete(f"/usuarios/{admin_de_la_empresa.id}")
+    assert editar.status_code == 404, editar.text
+    assert baja.status_code == 404, baja.text
+
+
+# --- Lo que debe seguir funcionando igual --------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_un_gestor_sigue_gestionando_a_un_usuario_raso(
+    client_gestor: AsyncClient, usuario_raso: Sesion
+) -> None:
+    nombre = await client_gestor.patch(f"/usuarios/{usuario_raso.id}", json={"nombre": "Renombrado"})
+    estado = await client_gestor.patch(f"/usuarios/{usuario_raso.id}", json={"estado": "bloqueado"})
+    password = await client_gestor.patch(f"/usuarios/{usuario_raso.id}", json={"password": "otra-valida-123"})
+    baja = await client_gestor.delete(f"/usuarios/{usuario_raso.id}")
+    assert nombre.status_code == 200, nombre.text
+    assert estado.status_code == 200, estado.text
+    assert password.status_code == 200, password.text
+    assert baja.status_code == 204, baja.text
+
+
+@pytest.mark.asyncio
+async def test_un_admin_sigue_moviendo_rol_y_empresa_de_otros(
+    client_admin: AsyncClient, usuario_raso: Sesion, otra_empresa: dict, rol_gestor_id: int
+) -> None:
+    rol = await client_admin.patch(f"/usuarios/{usuario_raso.id}", json={"rol_id": rol_gestor_id})
+    empresa = await client_admin.patch(
+        f"/usuarios/{usuario_raso.id}", json={"empresa_id": otra_empresa["id"]}
+    )
+    assert rol.status_code == 200, rol.text
+    assert empresa.status_code == 200, empresa.text
