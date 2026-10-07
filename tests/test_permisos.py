@@ -5,9 +5,16 @@ y una fuga aquí significa que un cliente ve los datos de otro.
 """
 
 import pytest
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
 
-from tests.conftest import Sesion, crear_sesion_en_bd, email_de_prueba, nif_de_prueba
+from app.main import app
+from tests.conftest import (
+    PASSWORD_TEST,
+    Sesion,
+    crear_sesion_en_bd,
+    email_de_prueba,
+    nif_de_prueba,
+)
 
 
 def _payload_usuario(empresa_id: int, rol_id: int) -> dict:
@@ -275,8 +282,6 @@ async def test_un_gestor_no_gestiona_al_admin_de_su_empresa(
 ) -> None:
     """AUD-002: el admin que comparte empresa con el gestor era editable por él,
     contraseña incluida, lo que permitía tomar su cuenta."""
-    from tests.conftest import PASSWORD_TEST
-
     editar = await client_gestor.patch(f"/usuarios/{admin_de_la_empresa.id}", json={"nombre": "Secuestrado"})
     password = await client_gestor.patch(
         f"/usuarios/{admin_de_la_empresa.id}", json={"password": "la-del-gestor-123"}
@@ -323,10 +328,6 @@ async def test_un_gestor_de_otra_empresa_recibe_404_no_403(
 ) -> None:
     """El tenant se comprueba primero: un 403 confirmaría que ese id existe."""
     forastero = await crear_sesion_en_bd(otra_empresa["id"], "gestor")
-    from httpx import ASGITransport
-
-    from app.main import app
-
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test", headers=forastero.headers
     ) as cliente:
