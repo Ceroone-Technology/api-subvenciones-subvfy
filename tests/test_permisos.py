@@ -5,9 +5,12 @@ y una fuga aquí significa que un cliente ve los datos de otro.
 """
 
 import pytest
+from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
+from app.core.permisos import ROL_ADMIN, ROL_GESTOR, ROL_USUARIO, UsuarioAutenticado
 from app.main import app
+from app.models import Usuario
 from tests.conftest import (
     PASSWORD_TEST,
     Sesion,
@@ -256,11 +259,25 @@ async def test_un_gestor_no_toca_empresa_id_ni_la_suya(
     client_gestor: AsyncClient, gestor: Sesion, usuario_raso: Sesion, empresa: dict, otra_empresa: dict
 ) -> None:
     """`empresa_id` es de admin: ni el propio ni el de otro, ni siquiera con el
-    valor que ya tienen."""
+    valor que ya tienen.
+
+    Con la empresa propia, antes devolvía 200: es lo que endurece este cambio.
+    Con una ajena ya devolvía 404 (`exigir_acceso_a_empresa`), y ahora da 403
+    porque el campo se rechaza por presencia, antes de mirar su valor.
+    """
     propio = await client_gestor.patch(f"/usuarios/{gestor.id}", json={"empresa_id": empresa["id"]})
     ajeno = await client_gestor.patch(f"/usuarios/{usuario_raso.id}", json={"empresa_id": empresa["id"]})
     assert propio.status_code == 403, propio.text
     assert ajeno.status_code == 403, ajeno.text
+
+    propio_ajena = await client_gestor.patch(
+        f"/usuarios/{gestor.id}", json={"empresa_id": otra_empresa["id"]}
+    )
+    ajeno_ajena = await client_gestor.patch(
+        f"/usuarios/{usuario_raso.id}", json={"empresa_id": otra_empresa["id"]}
+    )
+    assert propio_ajena.status_code == 403, propio_ajena.text
+    assert ajeno_ajena.status_code == 403, ajeno_ajena.text
 
 
 @pytest.mark.asyncio
@@ -335,6 +352,46 @@ async def test_un_gestor_de_otra_empresa_recibe_404_no_403(
         baja = await cliente.delete(f"/usuarios/{admin_de_la_empresa.id}")
     assert editar.status_code == 404, editar.text
     assert baja.status_code == 404, baja.text
+
+
+# --- La función de autorización, sin pasar por el router -----------------------
+
+
+def _autenticado(rol: str, *, usuario_id: int = 1, empresa_id: int = 1) -> UsuarioAutenticado:
+    return UsuarioAutenticado(
+        usuario=Usuario(id=usuario_id, empresa_id=empresa_id, rol_id=1), rol=rol
+    )
+
+
+def test_exigir_gestion_de_deniega_a_quien_no_gestiona_a_nadie() -> None:
+    """Hoy el router frena antes al rol `usuario`, así que esto no cambia
+    ninguna respuesta de la API. Se comprueba sobre la función porque una regla
+    de autorización no debe apoyarse en quién la llame para denegar: si mañana
+    un endpoint nuevo la usa sin ese filtro previo, tiene que seguir cerrada.
+    """
+    raso = _autenticado(ROL_USUARIO, usuario_id=1)
+
+    # Su propio perfil, siempre.
+    raso.exigir_gestion_de(1, ROL_USUARIO)
+
+    # A otro, aunque sea un usuario raso como él.
+    with pytest.raises(HTTPException) as fallo:
+        raso.exigir_gestion_de(2, ROL_USUARIO)
+    assert fallo.value.status_code == 403
+
+
+def test_exigir_gestion_de_segun_el_rol_del_objetivo() -> None:
+    gestor_ = _autenticado(ROL_GESTOR, usuario_id=1)
+    gestor_.exigir_gestion_de(2, ROL_USUARIO)
+    for rol_objetivo in (ROL_GESTOR, ROL_ADMIN):
+        with pytest.raises(HTTPException) as fallo:
+            gestor_.exigir_gestion_de(2, rol_objetivo)
+        assert fallo.value.status_code == 403, rol_objetivo
+
+    # Un admin gestiona a cualquiera.
+    admin_ = _autenticado(ROL_ADMIN, usuario_id=1)
+    for rol_objetivo in (ROL_USUARIO, ROL_GESTOR, ROL_ADMIN):
+        admin_.exigir_gestion_de(2, rol_objetivo)
 
 
 # --- Lo que debe seguir funcionando igual --------------------------------------

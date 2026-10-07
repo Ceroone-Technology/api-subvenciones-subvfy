@@ -105,12 +105,20 @@ class UsuarioAutenticado:
 
         El tenant lo comprueba antes quien llama (`exigir_acceso_a_empresa`),
         así que aquí solo queda el rol. Un admin gestiona a cualquiera; un
-        gestor, solo a usuarios con rol `usuario`; el propio perfil siempre se
-        permite, y los campos que puede tocar los decide
-        `exigir_campos_permitidos`.
+        gestor, solo a usuarios con rol `usuario`; quien no es ni lo uno ni lo
+        otro no gestiona a nadie. El propio perfil siempre se permite, y los
+        campos que puede tocar los decide `exigir_campos_permitidos`.
+
+        La regla se enuncia entera aquí aunque hoy el router frene antes al rol
+        `usuario`: una función de autorización no debe depender de quién la
+        llame para denegar.
         """
-        if self.es_admin or objetivo_id == self.id:
+        if objetivo_id == self.id or self.es_admin:
             return
+        if self.rol != ROL_GESTOR:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, detail="Solo puedes editar tu propio perfil."
+            )
         if rol_objetivo != ROL_USUARIO:
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
