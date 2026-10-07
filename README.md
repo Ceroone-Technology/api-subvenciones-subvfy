@@ -182,12 +182,26 @@ en la llamada siguiente.
 | Rol | Alcance |
 |---|---|
 | `admin` | Global: cualquier empresa y cualquier usuario. |
-| `gestor` | Lectura y escritura solo dentro de su propia empresa. |
+| `gestor` | Lectura y escritura dentro de su propia empresa, y solo sobre usuarios con rol `usuario`. |
 | `usuario` | Lee su empresa; edita únicamente su propio perfil (sin tocar `empresa_id`, `rol_id` ni `estado`). |
 
 Quien no es admin nunca ve datos de otra empresa: los listados **fuerzan** el
 filtro a la empresa del token, y un recurso de otro tenant responde 404 (no
 403, que confirmaría su existencia).
+
+Sobre el recurso `usuario` hay tres reglas más:
+
+- **`rol_id` y `empresa_id` solo los cambia un admin.** Si los envía un gestor,
+  403, aunque sea su propia empresa o el valor que ya tenían.
+- **Un gestor gestiona solo a usuarios con rol `usuario`.** Sobre un admin u
+  otro gestor de su empresa recibe 403, también al cambiar la contraseña.
+- **Nadie se cambia su propio rol ni su propio estado, ni se da de baja a sí
+  mismo**, admin incluido: 403. Si el único admin se degradara, ya no habría
+  quien lo arreglase por la API (queda el CLI `crear-admin`).
+
+El rechazo se decide por **presencia** del campo, no por su valor: un `PATCH`
+que reenvíe `rol_id` con el mismo valor que ya tenía también responde 403, así
+que conviene mandar solo los campos que cambian.
 
 ### Favoritos
 
