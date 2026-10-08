@@ -26,6 +26,15 @@ El orden de comprobación importa: **primero el tenant, después el rol**. Un
 objetivo de otra empresa da 404 sin mirar su rol, porque un 403 confirmaría
 que ese id existe.
 
+**La baja de una empresa corta el acceso de toda su gente** (AUD-009). Lo
+decide `motivo_cuenta_no_operativa`, una función pura que no sabe de HTTP:
+cada puerta de entrada la llama y traduce el motivo a su código, porque el
+login y el refresh no pasan por `usuario_actual` y la regla tiene que ser la
+misma en los tres sitios. Desde entonces, el `estado` de una empresa no es un
+campo cualquiera: ponerlo en `inactiva` deja fuera a todo el tenant en la
+petición siguiente, así que solo lo cambia un admin y nadie da de baja la
+empresa en la que vive.
+
 La regla transversal, y la que de verdad importa en un producto B2B
 multi-tenant: **nadie que no sea admin ve datos de otra empresa**. Los
 listados no se limitan a rechazar un `empresa_id` ajeno, sino que fuerzan
@@ -44,7 +53,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import TIPO_ACCESS, TokenInvalido, leer_token
 from app.database import get_db
-from app.models import Rol, Usuario
+from app.models import Empresa, Rol, Usuario
 
 ROL_ADMIN = "admin"
 ROL_GESTOR = "gestor"
@@ -54,6 +63,9 @@ ROL_USUARIO = "usuario"
 # privilegios y tenants, así que no los toca ningún gestor;
 # `CAMPOS_PROPIOS_BLOQUEADOS` son los que nadie puede cambiarse a sí mismo; y
 # `CAMPOS_DE_GESTION` es lo que no puede tocarse quien no gestiona a nadie.
+ESTADO_USUARIO_ACTIVO = "activo"
+ESTADO_EMPRESA_ACTIVA = "activa"
+
 CAMPOS_SOLO_ADMIN = ("rol_id", "empresa_id")
 CAMPOS_PROPIOS_BLOQUEADOS = ("rol_id", "estado")
 CAMPOS_DE_GESTION = ("empresa_id", "rol_id", "estado")
@@ -67,6 +79,25 @@ _NO_AUTENTICADO = HTTPException(
     detail="Credenciales ausentes o inválidas.",
     headers={"WWW-Authenticate": "Bearer"},
 )
+
+
+def motivo_cuenta_no_operativa(estado_usuario: str, estado_empresa: str) -> str | None:
+    """Por qué esta cuenta no puede operar, o `None` si puede.
+
+    Pura y sin `HTTPException` a propósito: la usan tres puertas de entrada
+    que responden distinto —`usuario_actual` y el login con 403 y el motivo,
+    el refresh con su 401 genérico—, así que el criterio vive aquí una sola
+    vez y la traducción a HTTP es de cada una.
+
+    La empresa se mira primero porque es la causa más amplia: si el tenant
+    está dado de baja, el estado de la cuenta es lo de menos y lo que hay que
+    arreglar es la empresa.
+    """
+    if estado_empresa != ESTADO_EMPRESA_ACTIVA:
+        return "La empresa está dada de baja."
+    if estado_usuario != ESTADO_USUARIO_ACTIVO:
+        return f"La cuenta está en estado '{estado_usuario}'."
+    return None
 
 
 @dataclass(frozen=True)
@@ -182,21 +213,26 @@ async def usuario_actual(
     except TokenInvalido as exc:
         raise _NO_AUTENTICADO from exc
 
+    # Un `join` más, no una consulta más: el estado de la empresa viaja en la
+    # misma sentencia que ya releía usuario y rol.
     fila = (
         await db.execute(
-            select(Usuario, Rol.codigo).join(Rol, Rol.id == Usuario.rol_id).where(Usuario.id == usuario_id)
+            select(Usuario, Rol.codigo, Empresa.estado)
+            .join(Rol, Rol.id == Usuario.rol_id)
+            .join(Empresa, Empresa.id == Usuario.empresa_id)
+            .where(Usuario.id == usuario_id)
         )
     ).first()
     if fila is None:
         raise _NO_AUTENTICADO
 
-    usuario, rol_codigo = fila
-    if usuario.estado != "activo":
+    usuario, rol_codigo, estado_empresa = fila
+    motivo = motivo_cuenta_no_operativa(usuario.estado, estado_empresa)
+    if motivo is not None:
         # El token sigue siendo criptográficamente válido, pero la cuenta ya
-        # no: bloquear a alguien tiene efecto inmediato, no cuando caduque.
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN, detail=f"La cuenta está en estado '{usuario.estado}'."
-        )
+        # no: bloquear a alguien, o dar de baja su empresa, tiene efecto
+        # inmediato y no cuando caduque el token.
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail=motivo)
     return UsuarioAutenticado(usuario=usuario, rol=rol_codigo)
 
 

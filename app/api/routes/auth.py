@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 
 from app.api.deps import DbDep
 from app.config import settings
-from app.core.permisos import UsuarioActualDep
+from app.core.permisos import UsuarioActualDep, motivo_cuenta_no_operativa
 from app.core.security import (
     TIPO_REFRESH,
     TokenInvalido,
@@ -26,7 +26,7 @@ from app.core.security import (
     leer_token,
     verificar_password,
 )
-from app.models import Usuario
+from app.models import Empresa, Usuario
 from app.schemas.auth import LoginRequest, RefreshRequest, SesionResponse, TokenResponse
 from app.schemas.usuario import UsuarioRead
 
@@ -57,9 +57,15 @@ def _segundos_de_access() -> int:
 
 @router.post("/login", response_model=SesionResponse, summary="Iniciar sesión")
 async def login(datos: LoginRequest, db: DbDep) -> SesionResponse:
-    usuario = (
-        await db.execute(select(Usuario).where(Usuario.email == datos.email))
-    ).scalar_one_or_none()
+    # El estado de la empresa viaja en la misma consulta: la baja de un cliente
+    # corta el acceso de toda su gente, y la regla es la de `usuario_actual`.
+    fila = (
+        await db.execute(
+            select(Usuario, Empresa.estado)
+            .join(Empresa, Empresa.id == Usuario.empresa_id)
+            .where(Usuario.email == datos.email)
+        )
+    ).first()
 
     # Mismo error para "no existe el email" que para "contraseña incorrecta":
     # distinguirlos convertiría el login en un comprobador de qué direcciones
@@ -68,18 +74,18 @@ async def login(datos: LoginRequest, db: DbDep) -> SesionResponse:
     # existe—, así que bcrypt se ejecuta en las dos ramas. La llamada va fuera
     # de cualquier `or` a propósito: detrás de uno, un cortocircuito la
     # saltaría y volveríamos al punto de partida.
-    hash_a_verificar = usuario.password_hash if usuario is not None else _HASH_DE_RELLENO
+    hash_a_verificar = fila[0].password_hash if fila is not None else _HASH_DE_RELLENO
     password_correcta = verificar_password(datos.password, hash_a_verificar)
-    if usuario is None or not password_correcta:
+    if fila is None or not password_correcta:
         raise _CREDENCIALES_INVALIDAS
 
-    # El estado se mira después de pagar el coste de bcrypt: comprobarlo antes
-    # devolvería el 403 sin verificar nada y sería otro canal por el que
-    # distinguir una cuenta existente de una que no lo es.
-    if usuario.estado != "activo":
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN, detail=f"La cuenta está en estado '{usuario.estado}'."
-        )
+    # Usuario y empresa se miran después de pagar el coste de bcrypt:
+    # comprobarlos antes devolvería el 403 sin verificar nada y sería otro
+    # canal por el que distinguir una cuenta existente de una que no lo es.
+    usuario, estado_empresa = fila
+    motivo = motivo_cuenta_no_operativa(usuario.estado, estado_empresa)
+    if motivo is not None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail=motivo)
 
     usuario.ultimo_acceso_at = func.now()
     await db.commit()
@@ -104,10 +110,18 @@ async def refresh(datos: RefreshRequest, db: DbDep) -> TokenResponse:
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
 
-    usuario = await db.get(Usuario, usuario_id)
-    if usuario is None or usuario.estado != "activo":
-        # Se revalida contra la base de datos: un usuario dado de baja no
-        # puede seguir renovando su sesión con un refresh emitido antes.
+    # Se revalida contra la base de datos: ni un usuario dado de baja ni la
+    # gente de una empresa dada de baja puede seguir renovando su sesión con
+    # un refresh emitido antes. Aquí el motivo no se detalla: el 401 genérico
+    # ya cubre a la vez el token inservible y la cuenta inutilizable.
+    fila = (
+        await db.execute(
+            select(Usuario.id, Usuario.estado, Empresa.estado)
+            .join(Empresa, Empresa.id == Usuario.empresa_id)
+            .where(Usuario.id == usuario_id)
+        )
+    ).first()
+    if fila is None or motivo_cuenta_no_operativa(fila[1], fila[2]) is not None:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,
             detail="Refresh token inválido o caducado.",
@@ -117,7 +131,7 @@ async def refresh(datos: RefreshRequest, db: DbDep) -> TokenResponse:
     # Solo se devuelve un access nuevo. Emitir también un refresh nuevo no
     # aportaría nada mientras el anterior siga siendo válido (no hay dónde
     # revocarlo); cuando el refresh caduque, toca volver a hacer login.
-    return TokenResponse(access_token=crear_access_token(usuario.id), expires_in=_segundos_de_access())
+    return TokenResponse(access_token=crear_access_token(fila[0]), expires_in=_segundos_de_access())
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT, summary="Cerrar sesión")
