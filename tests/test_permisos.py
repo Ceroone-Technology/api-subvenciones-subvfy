@@ -379,6 +379,18 @@ async def test_un_gestor_no_toca_el_estado_de_su_empresa(
 
 
 @pytest.mark.asyncio
+async def test_el_estado_de_otra_empresa_da_404_y_no_403(
+    client_gestor: AsyncClient, otra_empresa: dict
+) -> None:
+    """El tenant se comprueba antes que el campo, igual que en usuarios: un 403
+    aquí confirmaría que ese id existe en otro cliente."""
+    for estado in ("inactiva", "activa"):
+        respuesta = await client_gestor.patch(f"/empresas/{otra_empresa['id']}", json={"estado": estado})
+        assert respuesta.status_code == 404, f"estado={estado}: {respuesta.text}"
+        assert respuesta.json()["detail"] == "Empresa no encontrada."
+
+
+@pytest.mark.asyncio
 async def test_un_admin_no_da_de_baja_su_propia_empresa(
     client_admin: AsyncClient, admin: Sesion
 ) -> None:
