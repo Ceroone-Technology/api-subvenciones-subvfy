@@ -354,6 +354,68 @@ async def test_un_gestor_de_otra_empresa_recibe_404_no_403(
     assert baja.status_code == 404, baja.text
 
 
+# --- El estado de una empresa (AUD-009) ---------------------------------------
+#
+# Desde que la baja de la empresa corta el acceso, su `estado` dejó de ser un
+# campo cualquiera: ponerlo en `inactiva` deja fuera a toda la empresa en la
+# siguiente petición. De ahí las dos reglas.
+
+
+@pytest.mark.asyncio
+async def test_un_gestor_no_toca_el_estado_de_su_empresa(
+    client_gestor: AsyncClient, empresa: dict
+) -> None:
+    """Por presencia del campo, como `rol_id` en usuario: ni para darla de baja
+    ni para reactivarla, porque no es suya esa decisión."""
+    for estado in ("inactiva", "activa"):
+        respuesta = await client_gestor.patch(f"/empresas/{empresa['id']}", json={"estado": estado})
+        assert respuesta.status_code == 403, f"estado={estado}: {respuesta.text}"
+        assert "estado" in respuesta.json()["detail"]
+
+    # Lo demás de su empresa lo sigue editando.
+    assert (
+        await client_gestor.patch(f"/empresas/{empresa['id']}", json={"sector": "Industria"})
+    ).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_un_admin_no_da_de_baja_su_propia_empresa(
+    client_admin: AsyncClient, admin: Sesion
+) -> None:
+    """Las dos puertas, porque cerrar solo el DELETE dejaría la grande abierta.
+
+    Si pudiera, se dejaría fuera a sí mismo en la siguiente petición y la única
+    salida sería otro admin o el CLI.
+    """
+    patch = await client_admin.patch(f"/empresas/{admin.empresa_id}", json={"estado": "inactiva"})
+    assert patch.status_code == 403, patch.text
+
+    delete = await client_admin.delete(f"/empresas/{admin.empresa_id}")
+    assert delete.status_code == 403, delete.text
+
+
+@pytest.mark.asyncio
+async def test_un_admin_puede_reactivar_su_propia_empresa(
+    client_admin: AsyncClient, admin: Sesion
+) -> None:
+    """Lo que se rechaza es el valor que lo deja fuera, no el campo: mandar
+    `activa` sobre su propia empresa es inocuo y debe seguir funcionando."""
+    respuesta = await client_admin.patch(f"/empresas/{admin.empresa_id}", json={"estado": "activa"})
+    assert respuesta.status_code == 200, respuesta.text
+    assert respuesta.json()["estado"] == "activa"
+
+
+@pytest.mark.asyncio
+async def test_un_admin_sigue_dando_de_baja_otras_empresas(
+    client_admin: AsyncClient, empresa: dict, otra_empresa: dict
+) -> None:
+    patch = await client_admin.patch(f"/empresas/{empresa['id']}", json={"estado": "inactiva"})
+    assert patch.status_code == 200, patch.text
+    assert patch.json()["estado"] == "inactiva"
+
+    assert (await client_admin.delete(f"/empresas/{otra_empresa['id']}")).status_code == 204
+
+
 # --- La función de autorización, sin pasar por el router -----------------------
 
 

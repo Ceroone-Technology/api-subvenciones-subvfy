@@ -13,7 +13,12 @@ from app.core.security import TIPO_ACCESS, crear_access_token, crear_refresh_tok
 from app.database import AsyncSessionLocal
 from app.models import Usuario
 from app.services.sistema import EMAIL_SISTEMA
-from tests.conftest import PASSWORD_TEST, Sesion, crear_sesion_en_bd
+from tests.conftest import (
+    PASSWORD_TEST,
+    Sesion,
+    cambiar_estado_de_empresa,
+    crear_sesion_en_bd,
+)
 
 
 @pytest.mark.asyncio
@@ -148,6 +153,87 @@ async def test_la_cuenta_de_sistema_no_puede_iniciar_sesion(client: AsyncClient)
     async with AsyncSessionLocal() as db:
         estado = await db.scalar(select(Usuario.estado).where(Usuario.email == EMAIL_SISTEMA))
     assert estado == "bloqueado", "la cuenta de sistema no debe quedar utilizable"
+
+
+# --- Baja de la empresa (AUD-009) ----------------------------------------------
+#
+# Dar de baja una empresa corta el acceso de toda su gente, sin tocar sus
+# filas: en un producto B2B el tenant es la unidad de facturación, y que la
+# baja obligue a desactivar usuario por usuario es un agujero de negocio.
+# Cada canal responde como ya responde a una cuenta no activa: 403 con motivo
+# en login y en los endpoints, 401 genérico en el refresh.
+
+
+@pytest.mark.asyncio
+async def test_con_la_empresa_de_baja_no_se_entra_ni_se_opera(
+    client: AsyncClient, empresa: dict, gestor: Sesion
+) -> None:
+    await cambiar_estado_de_empresa(empresa["id"], "inactiva")
+
+    login = await client.post("/auth/login", json={"email": gestor.email, "password": PASSWORD_TEST})
+    assert login.status_code == 403, login.text
+    assert login.json()["detail"] == "La empresa está dada de baja."
+
+    # Y un token emitido antes de la baja deja de servir en el acto: la
+    # dependencia relee usuario y empresa en cada petición.
+    me = await client.get("/auth/me", headers={"Authorization": f"Bearer {gestor.token}"})
+    assert me.status_code == 403, me.text
+    assert me.json()["detail"] == "La empresa está dada de baja."
+
+    alertas = await client.get("/alertas", headers={"Authorization": f"Bearer {gestor.token}"})
+    assert alertas.status_code == 403, alertas.text
+
+
+@pytest.mark.asyncio
+async def test_el_refresh_de_una_empresa_de_baja_responde_401(
+    client: AsyncClient, empresa: dict, gestor: Sesion
+) -> None:
+    """401 genérico y no 403: en el refresh ese código ya cubre a la vez el
+    token inservible y la cuenta inutilizable, como con un usuario de baja."""
+    refresh = crear_refresh_token(gestor.id)
+    await cambiar_estado_de_empresa(empresa["id"], "inactiva")
+
+    respuesta = await client.post("/auth/refresh", json={"refresh_token": refresh})
+    assert respuesta.status_code == 401, respuesta.text
+    assert respuesta.json()["detail"] == "Refresh token inválido o caducado."
+
+
+@pytest.mark.asyncio
+async def test_la_empresa_de_baja_no_cambia_el_401_de_una_password_mala(
+    client: AsyncClient, empresa: dict, gestor: Sesion
+) -> None:
+    """La empresa se mira **después** de verificar la contraseña, igual que el
+    estado del usuario: si no, el 403 delataría qué direcciones existen sin
+    necesidad de acertar la contraseña (el canal que cerró AUD-010)."""
+    await cambiar_estado_de_empresa(empresa["id"], "inactiva")
+
+    respuesta = await client.post(
+        "/auth/login", json={"email": gestor.email, "password": "no-es-la-buena"}
+    )
+    assert respuesta.status_code == 401, respuesta.text
+    assert respuesta.json()["detail"] == "Email o contraseña incorrectos."
+
+
+@pytest.mark.asyncio
+async def test_al_reactivar_la_empresa_vuelve_el_acceso(
+    client: AsyncClient, empresa: dict, gestor: Sesion
+) -> None:
+    """Sin tocar a los usuarios: sus filas nunca se modificaron, así que la
+    reactivación no tiene que deshacer nada."""
+    await cambiar_estado_de_empresa(empresa["id"], "inactiva")
+    assert (
+        await client.post("/auth/login", json={"email": gestor.email, "password": PASSWORD_TEST})
+    ).status_code == 403
+
+    await cambiar_estado_de_empresa(empresa["id"], "activa")
+
+    login = await client.post("/auth/login", json={"email": gestor.email, "password": PASSWORD_TEST})
+    assert login.status_code == 200, login.text
+    me = await client.get(
+        "/auth/me", headers={"Authorization": f"Bearer {login.json()['access_token']}"}
+    )
+    assert me.status_code == 200
+    assert me.json()["estado"] == "activo", "la baja de la empresa no debe tocar al usuario"
 
 
 @pytest.mark.asyncio
