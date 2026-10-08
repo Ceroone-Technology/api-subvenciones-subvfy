@@ -9,6 +9,8 @@ El logout es del lado del cliente — ver la nota de `app.core.security`
 sobre la estrategia stateless.
 """
 
+import secrets
+
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import func, select
 
@@ -20,6 +22,7 @@ from app.core.security import (
     TokenInvalido,
     crear_access_token,
     crear_refresh_token,
+    hashear_password,
     leer_token,
     verificar_password,
 )
@@ -36,6 +39,18 @@ _CREDENCIALES_INVALIDAS = HTTPException(
 )
 
 
+# Hash contra el que se verifica cuando el email no existe, para que el login
+# cueste lo mismo exista o no la cuenta. Sin esto, el `or` cortocircuitaba y
+# bcrypt no se ejecutaba: 55 ms frente a 273 ms, suficiente para enumerar
+# direcciones con una sola peticion (AUD-010).
+#
+# Se genera con `hashear_password`, no a mano: asi comparte coste con los
+# hashes reales por construccion. Una constante escrita con otras rondas
+# reintroduciria la diferencia que esto viene a quitar. De una contrasena
+# aleatoria que nadie conoce, para que no haya ninguna entrada que la acierte.
+_HASH_DE_RELLENO = hashear_password(secrets.token_urlsafe(32))
+
+
 def _segundos_de_access() -> int:
     return settings.access_token_expire_minutes * 60
 
@@ -48,9 +63,19 @@ async def login(datos: LoginRequest, db: DbDep) -> SesionResponse:
 
     # Mismo error para "no existe el email" que para "contraseña incorrecta":
     # distinguirlos convertiría el login en un comprobador de qué direcciones
-    # están dadas de alta.
-    if usuario is None or not verificar_password(datos.password, usuario.password_hash):
+    # están dadas de alta. Y mismo **tiempo**, que es lo que fallaba: se
+    # verifica siempre contra un hash —el del usuario, o el de relleno si no
+    # existe—, así que bcrypt se ejecuta en las dos ramas. La llamada va fuera
+    # de cualquier `or` a propósito: detrás de uno, un cortocircuito la
+    # saltaría y volveríamos al punto de partida.
+    hash_a_verificar = usuario.password_hash if usuario is not None else _HASH_DE_RELLENO
+    password_correcta = verificar_password(datos.password, hash_a_verificar)
+    if usuario is None or not password_correcta:
         raise _CREDENCIALES_INVALIDAS
+
+    # El estado se mira después de pagar el coste de bcrypt: comprobarlo antes
+    # devolvería el 403 sin verificar nada y sería otro canal por el que
+    # distinguir una cuenta existente de una que no lo es.
     if usuario.estado != "activo":
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, detail=f"La cuenta está en estado '{usuario.estado}'."

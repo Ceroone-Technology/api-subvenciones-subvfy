@@ -7,10 +7,12 @@ from httpx import AsyncClient
 from jose import jwt
 from sqlalchemy import select
 
+from app.api.routes import auth as auth_router
 from app.config import settings
 from app.core.security import TIPO_ACCESS, crear_access_token, crear_refresh_token
 from app.database import AsyncSessionLocal
 from app.models import Usuario
+from app.services.sistema import EMAIL_SISTEMA
 from tests.conftest import PASSWORD_TEST, Sesion, crear_sesion_en_bd
 
 
@@ -72,6 +74,52 @@ async def test_login_email_inexistente_responde_igual_que_password_mala(
 
 
 @pytest.mark.asyncio
+async def test_el_login_verifica_un_hash_tambien_con_un_email_inexistente(
+    client: AsyncClient, gestor: Sesion, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AUD-010: el mensaje ya era el mismo en los dos casos, pero el tiempo no.
+
+    Con `usuario is None or not verificar_password(...)`, un email inexistente
+    cortocircuitaba el `or` y bcrypt no llegaba a ejecutarse: medido en la
+    auditoría, 55 ms frente a 273 ms. Una sola petición bastaba para saber si
+    una dirección está dada de alta.
+
+    Se espía la función en vez de cronometrar: un umbral de tiempo es frágil en
+    el CI, que comparte CPU, y lo que de verdad se quiere afirmar es que el
+    coste de bcrypt se paga en las dos ramas. El espía llama a la función real,
+    así que el login sigue comportándose igual.
+    """
+    verificaciones: list[str] = []
+    real = auth_router.verificar_password
+
+    def espia(password: str, password_hash: str) -> bool:
+        verificaciones.append(password_hash)
+        return real(password, password_hash)
+
+    # Sobre el módulo del router, que es donde se importó por nombre: parchear
+    # `app.core.security` no interceptaría nada.
+    monkeypatch.setattr(auth_router, "verificar_password", espia)
+
+    inexistente = await client.post(
+        "/auth/login",
+        json={"email": "no-existe@test.subvfy.example.com", "password": PASSWORD_TEST},
+    )
+    assert len(verificaciones) == 1, "con un email inexistente no se verificó ningún hash"
+
+    password_mala = await client.post(
+        "/auth/login", json={"email": gestor.email, "password": "no-es-la-buena"}
+    )
+    assert len(verificaciones) == 2, "con un email real debería verificarse una sola vez"
+
+    # El hash de relleno no puede ser el del usuario, ni al revés.
+    assert verificaciones[0] != verificaciones[1]
+
+    # Y la respuesta sigue siendo indistinguible.
+    assert inexistente.status_code == password_mala.status_code == 401
+    assert inexistente.json() == password_mala.json()
+
+
+@pytest.mark.asyncio
 async def test_login_de_cuenta_bloqueada(client: AsyncClient, empresa: dict) -> None:
     bloqueado = await crear_sesion_en_bd(empresa["id"], "usuario", estado="bloqueado")
     respuesta = await client.post(
@@ -79,6 +127,27 @@ async def test_login_de_cuenta_bloqueada(client: AsyncClient, empresa: dict) -> 
     )
     assert respuesta.status_code == 403
     assert "bloqueado" in respuesta.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_la_cuenta_de_sistema_no_puede_iniciar_sesion(client: AsyncClient) -> None:
+    """`sistema@subvfy.es` (seed de `b7f3c21a9d40`) es la identidad de auditoría
+    de los procesos automáticos, no una cuenta de acceso: nace `bloqueado` y
+    con una contraseña aleatoria que se descarta.
+
+    Lo que se afirma es que no se puede entrar y que sigue bloqueada. El 401 y
+    no el 403 del estado es lo que corresponde: la contraseña falla antes, así
+    que ni siquiera se llega a decir que la cuenta existe.
+    """
+    respuesta = await client.post(
+        "/auth/login", json={"email": EMAIL_SISTEMA, "password": PASSWORD_TEST}
+    )
+    assert respuesta.status_code == 401
+    assert respuesta.json()["detail"] == "Email o contraseña incorrectos."
+
+    async with AsyncSessionLocal() as db:
+        estado = await db.scalar(select(Usuario.estado).where(Usuario.email == EMAIL_SISTEMA))
+    assert estado == "bloqueado", "la cuenta de sistema no debe quedar utilizable"
 
 
 @pytest.mark.asyncio
