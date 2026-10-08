@@ -136,6 +136,19 @@ async def crear_convocatoria_en_bd(titulo: str = "Ayudas a la digitalización", 
         return convocatoria
 
 
+async def cambiar_estado_de_empresa(empresa_id: int, estado: str) -> None:
+    """Da de baja (o reactiva) una empresa directamente en la base de datos.
+
+    Por la API lo haría un admin, pero varios tests necesitan la empresa ya
+    inactiva *antes* de autenticarse, que es justo el caso que importa.
+    """
+    async with AsyncSessionLocal() as db:
+        empresa = await db.get(Empresa, empresa_id)
+        assert empresa is not None
+        empresa.estado = estado
+        await db.commit()
+
+
 async def crear_alerta_en_bd(usuario_id: int, **extra) -> int:
     """Devuelve el id: la alerta se recarga en la sesión donde vaya a usarse."""
     async with AsyncSessionLocal() as db:

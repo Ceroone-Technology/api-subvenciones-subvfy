@@ -50,7 +50,15 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Alerta, AlertaEjecucion, AlertaEjecucionConvocatoria, Convocatoria, Usuario
+from app.core.permisos import motivo_cuenta_no_operativa
+from app.models import (
+    Alerta,
+    AlertaEjecucion,
+    AlertaEjecucionConvocatoria,
+    Convocatoria,
+    Empresa,
+    Usuario,
+)
 from app.services import plantillas_email
 from app.services.email import EnviadorEmail, obtener_enviador
 from app.services.sistema import id_usuario_sistema
@@ -134,14 +142,24 @@ async def _intentar_aviso(
         # error, así que cuenta como entregada.
         return None
 
-    usuario = await db.get(Usuario, alerta.usuario_id)
-    if usuario is None:  # pragma: no cover - la FK lo impide
+    fila = (
+        await db.execute(
+            select(Usuario, Empresa.estado)
+            .join(Empresa, Empresa.id == Usuario.empresa_id)
+            .where(Usuario.id == alerta.usuario_id)
+        )
+    ).first()
+    if fila is None:  # pragma: no cover - la FK lo impide
         return f"La alerta {alerta.id} no tiene usuario asociado."
-    if usuario.estado != "activo":
-        # Se registra como error, no en silencio: si a alguien se le avisa de
-        # nada durante semanas por estar bloqueado, tiene que verse en el
-        # historial de la alerta.
-        return f"No se avisa a {usuario.email}: la cuenta está en estado '{usuario.estado}'."
+
+    usuario, estado_empresa = fila
+    # El mismo criterio que corta el acceso corta el aviso: a un cliente dado
+    # de baja no se le siguen mandando correos. Se registra como error y no en
+    # silencio, porque si a alguien se le deja de avisar durante semanas tiene
+    # que verse en el historial de la alerta.
+    motivo = motivo_cuenta_no_operativa(usuario.estado, estado_empresa)
+    if motivo is not None:
+        return f"No se avisa a {usuario.email}. {motivo}"
 
     convocatorias = await convocatorias_de(db, ejecucion.id)
     if not convocatorias:  # pragma: no cover - pendiente_envio implica que hay

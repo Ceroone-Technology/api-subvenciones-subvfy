@@ -203,6 +203,35 @@ El rechazo se decide por **presencia** del campo, no por su valor: un `PATCH`
 que reenvíe `rol_id` con el mismo valor que ya tenía también responde 403, así
 que conviene mandar solo los campos que cambian.
 
+### Dar de baja una empresa
+
+`DELETE /empresas/{id}` es una baja lógica (`estado = "inactiva"`), y **corta
+el acceso de todos sus usuarios**: el tenant es la unidad de facturación, así
+que la baja de un cliente no debería obligar a desactivar a mano uno por uno.
+Qué implica, exactamente:
+
+- **Nadie de esa empresa entra ni opera.** `POST /auth/login` responde 403 con
+  `La empresa está dada de baja.`, cualquier endpoint autenticado responde lo
+  mismo —también con un token emitido antes de la baja, porque usuario y
+  empresa se releen en cada petición— y `POST /auth/refresh` responde su 401
+  genérico de siempre.
+- **A sus usuarios no se les toca nada.** Siguen `activo` en su fila, así que
+  reactivar la empresa (`PATCH /empresas/{id}` con `{"estado": "activa"}`)
+  devuelve el acceso sin deshacer nada.
+- **Dejan de salir sus avisos de alerta.** La ejecución se queda en
+  `pendiente_envio` con el motivo en `detalle_error`, visible en el historial
+  de la alerta. Ojo: hoy **nadie reenvía la cola**, así que un aviso retenido
+  no sale solo al reactivar la empresa.
+- **Sus alertas se siguen evaluando** y consultando a la BDNS: lo que se corta
+  es el correo, no el motor.
+- **El `estado` de una empresa solo lo cambia un admin** (403 para un gestor,
+  por presencia del campo), y **nadie da de baja la empresa en la que vive**,
+  ni por `PATCH` ni por `DELETE`. Mandar `activa` sobre la propia sí funciona:
+  lo que se rechaza es el valor que te deja fuera.
+
+Como consecuencia, a una empresa inactiva solo la puede reactivar **un admin
+de otra empresa**: los suyos, gestores incluidos, están fuera.
+
 ### Favoritos
 
 Tres cosas que los separan del resto de recursos:

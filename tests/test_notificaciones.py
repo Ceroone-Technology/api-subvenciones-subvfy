@@ -29,6 +29,7 @@ from app.services.notificaciones import (
 from app.services.sistema import id_usuario_sistema
 from tests.conftest import (
     Sesion,
+    cambiar_estado_de_empresa,
     codigo_bdns_de_prueba,
     crear_alerta_en_bd,
     crear_sesion_en_bd,
@@ -228,6 +229,29 @@ async def test_no_se_avisa_a_una_cuenta_bloqueada(empresa: dict) -> None:
     # historial de la alerta, y el aviso debe poder salir cuando se reactive.
     assert resultado.estado_envio == ESTADO_PENDIENTE
     assert resultado.detalle_error is not None and "bloqueado" in resultado.detalle_error
+
+
+@pytest.mark.asyncio
+async def test_no_se_avisa_si_la_empresa_esta_de_baja(empresa: dict) -> None:
+    """A un cliente dado de baja no se le siguen mandando correos (AUD-009).
+
+    Mismo tratamiento que una cuenta bloqueada: la ejecución se queda en la
+    cola con el motivo en `detalle_error`, no se cierra en `error` y no se
+    pierde el rastro. Que **nadie barre esa cola** hoy es otro asunto, con su
+    propio hallazgo (AUD-018): este test no afirma que el aviso salga al
+    reactivar la empresa, solo dónde queda.
+    """
+    sesion = await crear_sesion_en_bd(empresa["id"], "usuario")
+    alerta_id = await crear_alerta_en_bd(sesion.id)
+    ejecucion_id = await _ejecutar(alerta_id, [_de_la_bdns()])
+    await cambiar_estado_de_empresa(empresa["id"], "inactiva")
+
+    enviador = EnviadorDePrueba()
+    resultado = await _avisar(ejecucion_id, enviador)
+
+    assert enviador.correos == []
+    assert resultado.estado_envio == ESTADO_PENDIENTE
+    assert resultado.detalle_error is not None and "empresa" in resultado.detalle_error.lower()
 
 
 # --- Fallos del proveedor ------------------------------------------------------
