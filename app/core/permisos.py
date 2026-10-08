@@ -70,6 +70,10 @@ CAMPOS_SOLO_ADMIN = ("rol_id", "empresa_id")
 CAMPOS_PROPIOS_BLOQUEADOS = ("rol_id", "estado")
 CAMPOS_DE_GESTION = ("empresa_id", "rol_id", "estado")
 
+# Y en el recurso `empresa`, `estado` es solo de admin desde que la baja corta
+# el acceso de todo el tenant: no es una preferencia del cliente.
+CAMPOS_EMPRESA_SOLO_ADMIN = ("estado",)
+
 # auto_error=False para poder devolver siempre el mismo 401 con cabecera
 # WWW-Authenticate, tanto si falta la cabecera como si el token es inválido.
 _bearer = HTTPBearer(auto_error=False, description="Access token obtenido en POST /auth/login.")
@@ -185,6 +189,32 @@ class UsuarioAutenticado:
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
                 detail=f"No puedes modificar estos campos: {', '.join(sorted(prohibidos))}.",
+            )
+
+    def exigir_campos_de_empresa_permitidos(self, campos: Iterable[str]) -> None:
+        """`estado` de empresa solo lo cambia un admin, por presencia del campo
+        y no por su valor: ni para dar de baja ni para reactivar, porque
+        tampoco es del gestor la decisión de devolver el acceso."""
+        if self.es_admin:
+            return
+        prohibidos = set(campos) & set(CAMPOS_EMPRESA_SOLO_ADMIN)
+        if prohibidos:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail=f"No puedes modificar estos campos: {', '.join(sorted(prohibidos))}.",
+            )
+
+    def exigir_no_es_su_propia_empresa(self, empresa_id: int) -> None:
+        """Nadie da de baja la empresa en la que vive.
+
+        Se rechaza **el valor que deja fuera**, no el campo: un admin puede
+        mandar `activa` sobre su propia empresa, que es inocuo. Lo que no
+        puede es desactivarla, porque se quedaría fuera en la petición
+        siguiente y la única salida sería otro admin o el CLI.
+        """
+        if empresa_id == self.empresa_id:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, detail="No puedes dar de baja tu propia empresa."
             )
 
     def exigir_no_es_uno_mismo(self, objetivo_id: int) -> None:
