@@ -98,6 +98,24 @@ La imagen de `docker-compose.yml` es de desarrollo: instala `requirements-dev.tx
 
 **Gotcha de entorno (Windows con Avast)**: el escudo web de Avast intercepta el HTTPS y el `pip install` del build falla con `CERTIFICATE_VERIFY_FAILED`, porque el contenedor no confía en el certificado raíz de Avast. Se resuelve excluyendo `pypi.org` y `files.pythonhosted.org` en Avast, no tocando el `Dockerfile` ni usando `--trusted-host`.
 
+## Configuración segura al arrancar (AUD-003, AUD-012)
+
+Decisiones cerradas con el usuario tras la auditoría del 06/10 — no las relajes sin preguntar. Todo vive en `Settings` (`app/config.py`) y falla **al construirlo**, es decir, al importar la app: es preferible no arrancar a descubrirlo en producción.
+
+- **`JWT_SECRET_KEY` es obligatoria**, sin valor por defecto en el código, mínimo 32 caracteres (`JWT_SECRET_KEY_MIN_CARACTERES`). El mensaje de error nombra la variable y el comando para generarla; el `"Field required"` de Pydantic la nombraba en minúsculas y sin decir qué hacer, por eso hay un `model_validator(mode="before")` propio.
+- **Fuera de `development` se rechazan los dos secretos públicos del repo**, `JWT_SECRET_KEY_EJEMPLO` (`.env.example`) y `JWT_SECRET_KEY_CI` (`ci.yml`). Si cambias cualquiera de esos dos valores, cambia la constante: `test_los_valores_publicos_son_los_del_repositorio` lo comprueba, pero **solo en el CI**, porque `.dockerignore` deja `.env.*` y `.github` fuera de la imagen y dentro del contenedor ese test se salta.
+- **`ENVIRONMENT` es `Literal["development", "production"]` y por defecto vale `production`**. Falla en cerrado: un despliegue que la olvide recibe las reglas estrictas, no las permisivas, y una errata (`prod`) no arranca. Si hace falta `staging`, se añade a `ENTORNOS` y se decide qué reglas le tocan.
+- **`JWT_ALGORITHM` solo admite `HS256`**, el único que se usa.
+- **`hide_input_in_errors=True` no es decorativo**: sin él, un `ValidationError` de `Settings` imprime en el log de arranque todo lo leído, secreto y `DATABASE_URL` con contraseña incluidos.
+- **El echo de SQL depende solo de `DATABASE_ECHO`** (`false` por defecto, también en development), nunca del entorno: vuelca cada sentencia con sus parámetros, hashes de contraseña incluidos. El engine se construye con `crear_engine(settings)` en `app/database.py` para poder probarlo con una configuración propia; `NullPool` no cambia.
+- **Fuera de este cambio, a propósito**: `ANTHROPIC_API_KEY` (hacerla obligatoria cuando el Hito 5 la use) y `DATABASE_URL` (su valor por defecto lleva credenciales; se resuelve con el gestor de secretos del Hito 7).
+
+**Gotcha de despliegue (Hito 7)**: **`alembic` también carga `Settings`** (`alembic/env.py` importa `app.config.settings` para leer `DATABASE_URL`), así que **una migración sin `JWT_SECRET_KEY` no arranca**, aunque no firme ningún token. El paso de migraciones del despliegue necesita el mismo secreto (y el mismo `ENVIRONMENT`) que la Lambda, o un valor válido propio.
+
+**Gotcha de tests**: los tests de `tests/test_config.py` construyen su propio `Settings(_env_file=None)` y borran con `monkeypatch` las variables que inyectan docker compose y el CI; no usan el `settings` global, que ya se creó al importar la app. El resto de la suite saca el secreto del entorno del contenedor (`env_file: .env`) o del bloque `env:` del workflow, sin tocar `conftest.py`.
+
+**Gotcha de entorno**: `docker compose` inyecta el `.env` al **crear** el contenedor. Tras cambiar el `.env`, `docker compose up -d`; un `restart` sigue con los valores viejos.
+
 No hay endpoints `/health`: existieron como validación del scaffolding en el Hito 2 Funcionalidad 1 y se retiraron una vez que hubo endpoints de negocio. Si en el Hito 7 hace falta un check de liveness para API Gateway/Lambda, se vuelve a añadir entonces con ese propósito explícito.
 
 ## Convenciones de código ya establecidas
