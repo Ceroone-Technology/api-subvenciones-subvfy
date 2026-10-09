@@ -8,7 +8,7 @@ API REST para un buscador de subvenciones (BDNS) con Favoritos, Alertas, Autenti
 
 ## Stack (decisión cerrada, no reabrir sin razón)
 
-FastAPI + SQLAlchemy 2.0 (async) + Alembic + Pydantic v2, sobre PostgreSQL vía asyncpg. JWT (python-jose + passlib/bcrypt) para autenticación. APScheduler en proceso para el motor de Alertas en local — en producción (AWS Lambda) se reemplaza por EventBridge Scheduler + una Lambda separada, ver más abajo. Anthropic SDK (Python) para Análisis con IA y Asistente IA. pytest + httpx.AsyncClient para tests. Docker/docker-compose para desarrollo local.
+FastAPI + SQLAlchemy 2.0 (async) + Alembic + Pydantic v2, sobre PostgreSQL vía asyncpg. JWT con PyJWT y contraseñas con bcrypt directo para autenticación (python-jose y passlib se retiraron en el ticket 8 de la auditoría, AUD-004: ver "Librerías de autenticación"). APScheduler en proceso para el motor de Alertas en local — en producción (AWS Lambda) se reemplaza por EventBridge Scheduler + una Lambda separada, ver más abajo. Anthropic SDK (Python) para Análisis con IA y Asistente IA. pytest + httpx.AsyncClient para tests. Docker/docker-compose para desarrollo local.
 
 **Por qué Python y no Node.js/TypeScript**: hubo una reunión paralela (Luis Huapaya) donde se acordó Node.js/TS para un track de trabajo distinto ("Subfy", con frontend React y practicantes). Para *esta* API se decidió mantener Python porque ya estaba construido y probado, y evita reescribir trabajo entregado. Si alguien pregunta por qué no coincide con esa reunión, esta es la razón.
 
@@ -102,7 +102,7 @@ La imagen de `docker-compose.yml` es de desarrollo: instala `requirements-dev.tx
 
 Decisiones cerradas con el usuario tras la auditoría del 06/10 — no las relajes sin preguntar. Todo vive en `Settings` (`app/config.py`) y falla **al construirlo**, es decir, al importar la app: es preferible no arrancar a descubrirlo en producción.
 
-- **`JWT_SECRET_KEY` es obligatoria**, sin valor por defecto en el código, mínimo 32 caracteres (`JWT_SECRET_KEY_MIN_CARACTERES`). El mensaje de error nombra la variable y el comando para generarla; el `"Field required"` de Pydantic la nombraba en minúsculas y sin decir qué hacer, por eso hay un `model_validator(mode="before")` propio.
+- **`JWT_SECRET_KEY` es obligatoria**, sin valor por defecto en el código, mínimo 32 caracteres (`JWT_SECRET_KEY_MIN_CARACTERES`), **medidos tras quitar los espacios de los extremos** (40 espacios no arrancan). La comparación con los secretos públicos también se hace sin espacios, para que `" <valor de .env.example> "` no se cuele. El mensaje de error nombra la variable y el comando para generarla; el `"Field required"` de Pydantic la nombraba en minúsculas y sin decir qué hacer, por eso hay un `model_validator(mode="before")` propio.
 - **Fuera de `development` se rechazan los dos secretos públicos del repo**, `JWT_SECRET_KEY_EJEMPLO` (`.env.example`) y `JWT_SECRET_KEY_CI` (`ci.yml`). Si cambias cualquiera de esos dos valores, cambia la constante: `test_los_valores_publicos_son_los_del_repositorio` lo comprueba, pero **solo en el CI**, porque `.dockerignore` deja `.env.*` y `.github` fuera de la imagen y dentro del contenedor ese test se salta.
 - **`ENVIRONMENT` es `Literal["development", "production"]` y por defecto vale `production`**. Falla en cerrado: un despliegue que la olvide recibe las reglas estrictas, no las permisivas, y una errata (`prod`) no arranca. Si hace falta `staging`, se añade a `ENTORNOS` y se decide qué reglas le tocan.
 - **`JWT_ALGORITHM` solo admite `HS256`**, el único que se usa.
@@ -134,9 +134,21 @@ No hay endpoints `/health`: existieron como validación del scaffolding en el Hi
 - `DELETE` sobre empresa/usuario es baja lógica (`estado`), no borrado físico: ambos aparecen en `created_by`/`updated_by` de todo el esquema.
 - Los valores únicos (NIF, email) se comprueban con un SELECT previo para devolver un 409 con mensaje útil, y las FK con un `db.get()` previo para devolver 400 en vez de dejar escapar un `ForeignKeyViolationError`.
 
-**Gotcha ya resuelto, no lo reintroduzcas**: `requirements.txt` fija `bcrypt==4.2.1`. `passlib[bcrypt]==1.7.4` no pone techo de versión, y con bcrypt >= 5.0 passlib no consigue cargar su backend (revienta en la detección con `ValueError: password cannot be longer than 72 bytes`), así que un build limpio sin ese pin deja el hashing de contraseñas inservible.
-
 **Gotcha de tests**: los emails de prueba no pueden usar el TLD `.test` (ni `.invalid`/`.localhost`) — `email-validator`, que es lo que hay detrás de `EmailStr`, los rechaza como direcciones no válidas. Se usa `@test.subvfy.example.com`.
+
+## Librerías de autenticación (AUD-004, ticket 8)
+
+Decisión reabierta con motivo y cerrada con el usuario: **PyJWT** sustituye a python-jose, y **bcrypt directo** a passlib. python-jose arrastraba avisos sin arreglo (PYSEC-2025-185, y los de `ecdsa`); passlib está sin mantenimiento desde 2020 y obligaba a fijar `bcrypt==4.2.1`. Ese pin ya no existe: no lo vuelvas a poner, ni vuelvas a meter passlib.
+
+- **Versiones**: `PyJWT==2.15.0` (sin extra `[crypto]`: HS256 no necesita `cryptography`) y `bcrypt==5.0.0`. La interfaz de `app/core/security.py` no cambió: el resto del código sigue usando `hashear_password`, `verificar_password`, `crear_*_token`, `leer_token` y `TokenInvalido`.
+- **`algorithms=[settings.jwt_algorithm]` al decodificar no se quita**: sin lista fija, la cabecera del token elegiría el algoritmo (`alg: none`, confusión de algoritmos).
+- **Los hashes guardados no se migraron**: passlib y `bcrypt.gensalt(rounds=12)` producen el mismo `$2b$12$` de 60 caracteres. `tests/test_security.py` fija dos hashes **generados por passlib** como literales; si fallan, se ha roto la compatibilidad con lo que hay en producción.
+- **El límite de 72 bytes, y por qué hay un corte en `verificar_password`**:
+  - bcrypt 5 **lanza `ValueError`** con más de 72 bytes, en `hashpw` y en `checkpw`. passlib truncaba en silencio.
+  - Antes del cambio, el schema usaba `max_length=72`, que cuenta **caracteres**: 40 «ñ» (80 bytes) pasaban y se guardaba el hash de los primeros 72 bytes.
+  - Ahora el alias `Password` (alta y `PATCH` de usuario) valida **bytes UTF-8** y da 422, y la CLI hace lo mismo con su `SystemExit`. `hashear_password` **no corta**: si le llega algo más largo, lanza.
+  - **`verificar_password` sí corta a 72 bytes antes de `checkpw`**, igual que passlib. No es un descuido: es lo que permite entrar a quien se dio de alta con más de 72 bytes antes del cambio, y lo que evita un 500 en el login. Por eso `LoginRequest` **no** valida bytes. Lo fijan `test_un_hash_de_passlib_de_mas_de_72_bytes_sigue_verificando_con_la_password_entera` y `test_quien_se_dio_de_alta_con_mas_de_72_bytes_sigue_entrando`.
+- **Gotcha de tests**: `test_security.py` fabrica los tokens inválidos (caducado, manipulado, HS512, `alg: none`, otra clave) con `hmac` de la biblioteca estándar, **no** con PyJWT, para que el test no dependa de la librería que vigila. `test_auth.py` sí usa `jwt.encode` de PyJWT en dos tests; el de "otra clave" emite un `InsecureKeyLengthWarning` (clave de 30 bytes) que es esperado.
 
 ## Autenticación y permisos (desde Hito 2, Funcionalidad 4)
 

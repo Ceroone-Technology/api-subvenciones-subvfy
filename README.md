@@ -71,7 +71,7 @@ La API **no arranca** si la configuración no es segura, y el error dice qué va
 
 | Variable | Regla |
 |---|---|
-| `JWT_SECRET_KEY` | **Obligatoria**, mínimo 32 caracteres. Fuera de `development` se rechazan los dos valores que están en el repositorio (el de `.env.example` y el del CI). Para generar uno: `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
+| `JWT_SECRET_KEY` | **Obligatoria**, mínimo 32 caracteres sin contar los espacios de los extremos. Fuera de `development` se rechazan los dos valores que están en el repositorio (el de `.env.example` y el del CI). Para generar uno: `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
 | `ENVIRONMENT` | `development` o `production`. **Sin ella vale `production`**, el modo estricto: olvidarla en un despliegue no puede dejar la API en modo permisivo. |
 | `JWT_ALGORITHM` | Solo `HS256`. |
 | `DATABASE_ECHO` | `false` por defecto, **también en development**. Con `true`, SQLAlchemy escribe en el log cada sentencia **con sus parámetros** (hashes de contraseña, emails, tokens): enciéndelo solo mientras depuras. |
@@ -184,7 +184,9 @@ Convenciones comunes a los listados y las escrituras:
   único (NIF de empresa, email de usuario), 400 si se referencia una empresa o
   un rol inexistente, 422 si el body no valida.
 - La contraseña se envía en claro (`password`) y se guarda hasheada con bcrypt;
-  `password_hash` no aparece en ninguna respuesta.
+  `password_hash` no aparece en ninguna respuesta. Al crearla o cambiarla debe
+  tener entre 8 caracteres y **72 bytes en UTF-8** (el límite de bcrypt): las
+  letras con tilde y la ñ ocupan dos bytes, así que 40 «ñ» ya no caben y dan 422.
 
 ## Autenticación y permisos
 
