@@ -22,7 +22,7 @@ import sys
 
 from sqlalchemy import select
 
-from app.core.security import PASSWORD_MIN_LONGITUD, hashear_password
+from app.core.security import PASSWORD_MAX_BYTES, PASSWORD_MIN_LONGITUD, hashear_password
 from app.database import AsyncSessionLocal
 from app.models import Empresa, Rol, Usuario
 
@@ -101,6 +101,11 @@ def main(argv: list[str] | None = None) -> None:
     password = args.password or _pedir_password()
     if len(password) < PASSWORD_MIN_LONGITUD:
         raise SystemExit(f"La contraseña debe tener al menos {PASSWORD_MIN_LONGITUD} caracteres.")
+    if len(password.encode("utf-8")) > PASSWORD_MAX_BYTES:
+        raise SystemExit(
+            f"La contraseña no puede ocupar más de {PASSWORD_MAX_BYTES} bytes en UTF-8 "
+            "(las letras con tilde y la ñ ocupan dos)."
+        )
 
     asyncio.run(
         crear_admin(

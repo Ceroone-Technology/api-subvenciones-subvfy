@@ -1,4 +1,4 @@
-"""Hashing de contraseñas (bcrypt vía passlib) y emisión/lectura de JWT.
+"""Hashing de contraseñas (bcrypt) y emisión/lectura de JWT (PyJWT).
 
 Estrategia de sesión: **stateless**. No hay tabla de sesiones ni de tokens
 revocados — el esquema de `schema-subvfy.sql` no la tiene y no se añade a
@@ -19,20 +19,23 @@ cada petición autenticada. Consecuencias que hay que asumir:
 
 from datetime import UTC, datetime, timedelta
 
+import bcrypt
 import jwt
-from passlib.context import CryptContext
 
 from app.config import settings
 
-# Longitud máxima que acepta bcrypt. Se expone para que los schemas la usen
-# como `max_length` en vez de repetir el número.
+# Longitud máxima que acepta bcrypt, en bytes UTF-8 (no en caracteres: una ñ
+# ocupa dos). Se expone para que los schemas y la CLI la usen en vez de
+# repetir el número.
 PASSWORD_MIN_LONGITUD = 8
 PASSWORD_MAX_BYTES = 72
 
+# Las mismas rondas y el mismo prefijo ($2b$) que usaba passlib: los hashes
+# nuevos y los ya guardados tienen la misma forma.
+BCRYPT_RONDAS = 12
+
 TIPO_ACCESS = "access"
 TIPO_REFRESH = "refresh"
-
-_contexto = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 class TokenInvalido(Exception):
@@ -41,11 +44,21 @@ class TokenInvalido(Exception):
 
 
 def hashear_password(password: str) -> str:
-    return _contexto.hash(password)
+    """No corta: con más de PASSWORD_MAX_BYTES bytes, bcrypt lanza ValueError.
+    Los schemas y la CLI lo rechazan antes, con un mensaje útil."""
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=BCRYPT_RONDAS)).decode("ascii")
 
 
 def verificar_password(password: str, password_hash: str) -> bool:
-    return _contexto.verify(password, password_hash)
+    """Corta a PASSWORD_MAX_BYTES bytes antes de comprobar, como hacía passlib.
+
+    Hasta el cambio de librería, el schema contaba caracteres y passlib truncaba
+    en silencio, así que quien se dio de alta con más de 72 bytes (una
+    contraseña larga con tildes o eñes) tiene guardado el hash de esos 72. Sin
+    este corte no podría volver a entrar, y bcrypt 5 lanzaría ValueError: un 500
+    en el login para cualquiera que mande una contraseña así.
+    """
+    return bcrypt.checkpw(password.encode("utf-8")[:PASSWORD_MAX_BYTES], password_hash.encode("ascii"))
 
 
 def _crear_token(usuario_id: int, tipo: str, duracion: timedelta) -> str:

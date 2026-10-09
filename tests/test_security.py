@@ -23,7 +23,9 @@ import time
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import update
 
+from app import cli
 from app.config import settings
 from app.core.security import (
     TIPO_ACCESS,
@@ -31,10 +33,13 @@ from app.core.security import (
     TokenInvalido,
     crear_access_token,
     crear_refresh_token,
+    hashear_password,
     leer_token,
     verificar_password,
 )
-from tests.conftest import Sesion
+from app.database import AsyncSessionLocal
+from app.models import Usuario
+from tests.conftest import Sesion, crear_sesion_en_bd
 
 PASSWORD_NORMAL = "password-de-prueba"
 HASH_PASSLIB_NORMAL = "$2b$12$kdVoC1pZxZ.KguTLp0xS5ebS1ccSfpwA8Vq7.6IgQwtB7FKmcMmiW"
@@ -153,3 +158,92 @@ def test_leer_token_rechaza(fabricar) -> None:
 async def test_el_token_que_no_vale_da_401(client: AsyncClient, gestor: Sesion, fabricar) -> None:
     respuesta = await client.get("/auth/me", headers={"Authorization": f"Bearer {fabricar(gestor.id)}"})
     assert respuesta.status_code == 401
+
+
+# --- Contraseñas de más de 72 bytes (bcrypt directo) -------------------------
+# Desde aquí, tests añadidos con el cambio a bcrypt 5: fijan lo nuevo, no lo
+# que ya hacía passlib.
+
+PASSWORD_72_BYTES = "ñ" * 36
+
+
+def test_un_hash_nuevo_tiene_la_forma_de_los_de_passlib() -> None:
+    nuevo = hashear_password(PASSWORD_NORMAL)
+    assert nuevo.startswith("$2b$12$") and len(nuevo) == len(HASH_PASSLIB_NORMAL)
+    assert verificar_password(PASSWORD_NORMAL, nuevo)
+
+
+def test_hashear_no_corta_y_lanza_con_mas_de_72_bytes() -> None:
+    with pytest.raises(ValueError):
+        hashear_password(PASSWORD_LARGA_MULTIBYTE)
+
+
+def test_verificar_corta_a_72_bytes_como_passlib() -> None:
+    assert verificar_password(PASSWORD_LARGA_MULTIBYTE, hashear_password(PASSWORD_72_BYTES))
+
+
+async def test_un_alta_de_mas_de_72_bytes_da_422_aunque_quepa_en_72_caracteres(
+    client_admin: AsyncClient, empresa: dict, rol_usuario_id: int, email_unico: str
+) -> None:
+    datos = {
+        "empresa_id": empresa["id"],
+        "rol_id": rol_usuario_id,
+        "nombre": "Ana",
+        "apellidos": "García López",
+        "email": email_unico,
+        "password": PASSWORD_LARGA_MULTIBYTE,
+    }
+    respuesta = await client_admin.post("/usuarios", json=datos)
+    assert respuesta.status_code == 422
+    assert "72 bytes" in respuesta.text
+
+
+async def test_un_alta_de_72_bytes_justos_se_acepta(
+    client_admin: AsyncClient, empresa: dict, rol_usuario_id: int, email_unico: str
+) -> None:
+    datos = {
+        "empresa_id": empresa["id"],
+        "rol_id": rol_usuario_id,
+        "nombre": "Ana",
+        "apellidos": "García López",
+        "email": email_unico,
+        "password": PASSWORD_72_BYTES,
+    }
+    assert (await client_admin.post("/usuarios", json=datos)).status_code == 201
+    login = await client_admin.post("/auth/login", json={"email": email_unico, "password": PASSWORD_72_BYTES})
+    assert login.status_code == 200
+
+
+async def test_un_cambio_de_password_de_mas_de_72_bytes_da_422(
+    client_admin: AsyncClient, usuario_raso: Sesion
+) -> None:
+    respuesta = await client_admin.patch(f"/usuarios/{usuario_raso.id}", json={"password": PASSWORD_LARGA_MULTIBYTE})
+    assert respuesta.status_code == 422
+
+
+async def test_quien_se_dio_de_alta_con_mas_de_72_bytes_sigue_entrando(client: AsyncClient, empresa: dict) -> None:
+    """El caso de 5a de punta a punta: un usuario con el hash truncado que
+    guardó passlib entra por el login con su contraseña entera."""
+    sesion = await crear_sesion_en_bd(empresa["id"], "usuario")
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(Usuario).where(Usuario.id == sesion.id).values(password_hash=HASH_PASSLIB_LARGA_MULTIBYTE)
+        )
+        await db.commit()
+
+    respuesta = await client.post("/auth/login", json={"email": sesion.email, "password": PASSWORD_LARGA_MULTIBYTE})
+    assert respuesta.status_code == 200, respuesta.text
+
+
+async def test_un_login_de_mas_de_72_bytes_con_password_mala_da_401(client: AsyncClient, gestor: Sesion) -> None:
+    """Ni 422 (el login no valida reglas de contraseña) ni 500 (bcrypt 5 lanza
+    con más de 72 bytes si no se corta antes)."""
+    respuesta = await client.post("/auth/login", json={"email": gestor.email, "password": "ç" * 40})
+    assert respuesta.status_code == 401
+
+
+def test_la_cli_rechaza_mas_de_72_bytes_antes_de_tocar_la_base_de_datos() -> None:
+    argumentos = ["crear-admin", "--empresa", "E", "--nif", "B00000000", "--email", "a@test.subvfy.example.com"]
+    argumentos += ["--nombre", "A", "--apellidos", "B", "--password", PASSWORD_LARGA_MULTIBYTE]
+    with pytest.raises(SystemExit, match="72 bytes"):
+        cli.main(argumentos)

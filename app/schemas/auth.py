@@ -11,6 +11,9 @@ class LoginRequest(BaseModel):
     # Sin min_length: en el login no se validan reglas de contraseña, solo
     # se comprueba si coincide. Un 422 aquí le diría a quien prueba
     # credenciales que esa contraseña ni siquiera merecía consulta.
+    # Tampoco se validan bytes, a propósito: quien se dio de alta con más de 72
+    # bytes cuando passlib truncaba tiene que poder entrar, y verificar_password
+    # ya corta a 72 antes de llamar a bcrypt.
     password: str = Field(max_length=PASSWORD_MAX_BYTES)
 
 
