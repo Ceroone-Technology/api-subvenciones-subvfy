@@ -5,22 +5,47 @@ mágicos repartidos por el código: todo lo configurable vive aquí.
 """
 
 from functools import lru_cache
+from typing import Any, Literal
 
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+ENTORNOS = ("development", "production")
+
+# Secretos de firma que están escritos en el repositorio y por tanto son
+# públicos: valen para desarrollo y para el CI, nunca fuera de development.
+JWT_SECRET_KEY_EJEMPLO = "dev-only-inseguro-no-usar-fuera-de-desarrollo-0000"
+JWT_SECRET_KEY_CI = "ci-only-inseguro-no-usar-fuera-del-ci-000000000000"
+JWT_SECRETOS_PUBLICOS = frozenset({JWT_SECRET_KEY_EJEMPLO, JWT_SECRET_KEY_CI})
+JWT_SECRET_KEY_MIN_CARACTERES = 32
+
+_COMO_GENERAR_SECRETO = 'genera uno con: python -c "import secrets; print(secrets.token_urlsafe(48))"'
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # hide_input_in_errors: un error de validación imprime por defecto todo lo
+    # leído (secreto y DATABASE_URL con contraseña incluidos) en el log de arranque.
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", hide_input_in_errors=True
+    )
 
-    # Entorno
-    environment: str = "development"
+    # Entorno. Por defecto el estricto: un despliegue que olvide ENVIRONMENT
+    # tiene que fallar en cerrado, no quedarse en el modo permisivo.
+    environment: Literal[ENTORNOS] = "production"  # type: ignore[valid-type]
 
     # Base de datos (PostgreSQL vía asyncpg)
     database_url: str = "postgresql+asyncpg://subvfy:subvfy@localhost:5432/subvfy"
+    # Echo de SQL de SQLAlchemy. Vuelca cada sentencia CON SUS PARÁMETROS
+    # (hashes de contraseña, emails, tokens): solo se enciende a mano para
+    # depurar y nunca depende del entorno (AUD-012).
+    database_echo: bool = False
 
-    # Autenticación JWT
-    jwt_secret_key: str = "changeme-en-produccion"
-    jwt_algorithm: str = "HS256"
+    # Autenticación JWT. Obligatorio y sin valor por defecto (AUD-003): con un
+    # secreto conocido cualquiera puede firmar tokens de cualquier usuario.
+    jwt_secret_key: str = Field(min_length=JWT_SECRET_KEY_MIN_CARACTERES)
+    # Solo HS256: es el que se usa, y aceptar otro valor de la configuración
+    # abriría la puerta a algoritmos que nadie ha revisado.
+    jwt_algorithm: Literal["HS256"] = "HS256"
     access_token_expire_minutes: int = 60
     # El refresh token es el que sostiene la sesión larga del frontend.
     # Al ser stateless no se puede revocar, así que su duración es el
@@ -76,6 +101,31 @@ class Settings(BaseSettings):
 
     # CORS — orígenes permitidos, separados por coma
     cors_origins: str = "http://localhost:4200"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _exigir_jwt_secret_key(cls, datos: Any) -> Any:
+        """Mensaje propio cuando falta o es corto: el "Field required" de
+        Pydantic nombra el campo en minúsculas y no dice qué hacer."""
+        if isinstance(datos, dict):
+            secreto = datos.get("jwt_secret_key")
+            if not secreto:
+                raise ValueError(f"Falta JWT_SECRET_KEY: es obligatoria; {_COMO_GENERAR_SECRETO}")
+            if isinstance(secreto, str) and len(secreto) < JWT_SECRET_KEY_MIN_CARACTERES:
+                raise ValueError(
+                    f"JWT_SECRET_KEY debe tener al menos {JWT_SECRET_KEY_MIN_CARACTERES} caracteres; "
+                    f"{_COMO_GENERAR_SECRETO}"
+                )
+        return datos
+
+    @model_validator(mode="after")
+    def _rechazar_secretos_publicos_fuera_de_development(self) -> "Settings":
+        if self.environment != "development" and self.jwt_secret_key in JWT_SECRETOS_PUBLICOS:
+            raise ValueError(
+                f"JWT_SECRET_KEY usa un valor público del repositorio (.env.example o CI) con "
+                f"ENVIRONMENT={self.environment}; {_COMO_GENERAR_SECRETO}"
+            )
+        return self
 
     @property
     def cors_origins_list(self) -> list[str]:

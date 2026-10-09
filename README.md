@@ -65,6 +65,29 @@ Los pasos 3 y 4 solo hacen falta la primera vez: los datos viven en un volumen d
 
 Para probar la API, lo más cómodo es **http://localhost:8000/docs**: haz `POST /auth/login` con las credenciales del admin que acabas de crear, copia el `access_token` y pégalo en el botón *Authorize* de arriba a la derecha. A partir de ahí, todas las llamadas que lances desde el Swagger llevan la cabecera puesta.
 
+### Configuración que la API valida al arrancar
+
+La API **no arranca** si la configuración no es segura, y el error dice qué variable falla:
+
+| Variable | Regla |
+|---|---|
+| `JWT_SECRET_KEY` | **Obligatoria**, mínimo 32 caracteres. Fuera de `development` se rechazan los dos valores que están en el repositorio (el de `.env.example` y el del CI). Para generar uno: `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
+| `ENVIRONMENT` | `development` o `production`. **Sin ella vale `production`**, el modo estricto: olvidarla en un despliegue no puede dejar la API en modo permisivo. |
+| `JWT_ALGORITHM` | Solo `HS256`. |
+| `DATABASE_ECHO` | `false` por defecto, **también en development**. Con `true`, SQLAlchemy escribe en el log cada sentencia **con sus parámetros** (hashes de contraseña, emails, tokens): enciéndelo solo mientras depuras. |
+
+**Si tu `.env` es anterior a esta regla, la API ya no arranca** (el antiguo `JWT_SECRET_KEY=changeme-en-produccion` tiene 22 caracteres). Tienes dos salidas:
+
+```bash
+cp .env.example .env            # regenerarlo entero (pierdes tus ajustes locales)
+# o bien, cambiar solo esa línea del .env por la de .env.example:
+# JWT_SECRET_KEY=dev-only-inseguro-no-usar-fuera-de-desarrollo-0000
+
+docker compose up -d            # recrea el contenedor: un "restart" NO relee el .env
+```
+
+`docker compose` inyecta el `.env` como variables de entorno al **crear** el contenedor, así que tras tocarlo hace falta `up -d`, no `restart`. Lo mismo vale para `alembic`: carga la misma configuración y tampoco arranca sin `JWT_SECRET_KEY`.
+
 ### El día a día
 
 Todos estos comandos se ejecutan **desde tu máquina**, en la carpeta del proyecto: `docker compose exec` es justo lo que entra al contenedor por ti, no hay que "entrar" a ningún sitio antes. Si ves `no configuration file provided: not found`, es que te falta el `cd`.
