@@ -7,10 +7,12 @@ las variables que docker compose (`env_file`) o el workflow inyectan en el
 proceso, para que lo que se pruebe sea lo que dice cada test y nada más.
 """
 
+import logging
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import text
 
 from app.config import (
     JWT_SECRET_KEY_CI,
@@ -18,6 +20,8 @@ from app.config import (
     JWT_SECRET_KEY_MIN_CARACTERES,
     Settings,
 )
+from app.config import settings as settings_de_la_suite
+from app.database import crear_engine
 
 VARIABLES_DEL_ENTORNO = ("ENVIRONMENT", "JWT_SECRET_KEY", "JWT_ALGORITHM", "DATABASE_ECHO")
 SECRETO_VALIDO = "un-secreto-de-test-con-mas-de-32-caracteres"
@@ -107,6 +111,56 @@ def test_los_secretos_publicos_valen_en_development(secreto_publico: str) -> Non
 def test_otro_algoritmo_jwt_no_arranca() -> None:
     with pytest.raises(ValidationError, match="jwt_algorithm"):
         construir(environment="development", jwt_secret_key=SECRETO_VALIDO, jwt_algorithm="none")
+
+
+def test_database_echo_apagado_por_defecto_tambien_en_development() -> None:
+    assert construir(environment="development", jwt_secret_key=SECRETO_VALIDO).database_echo is False
+
+
+def test_database_echo_se_enciende_a_mano(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_ECHO", "true")
+    config = construir(environment="production", jwt_secret_key=SECRETO_VALIDO)
+    assert crear_engine(config).echo is True
+
+
+@pytest.mark.parametrize(
+    ("database_echo", "sql_en_el_log"),
+    [
+        (None, False),  # el caso del criterio: development sin DATABASE_ECHO
+        ("true", True),  # control: demuestra que el test sí ve el SQL cuando lo hay
+    ],
+)
+async def test_en_development_el_log_solo_lleva_sql_con_database_echo(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    database_echo: str | None,
+    sql_en_el_log: bool,
+) -> None:
+    """El síntoma de AUD-012, medido en el log y no en el flag: se ejecuta una
+    sentencia de verdad. La raíz se pone en DEBUG, más permisiva que el INFO
+    que configura el lifespan, para que no sea el nivel quien lo oculte."""
+    if database_echo is not None:
+        monkeypatch.setenv("DATABASE_ECHO", database_echo)
+    config = construir(
+        environment="development",
+        jwt_secret_key=SECRETO_VALIDO,
+        database_url=settings_de_la_suite.database_url,
+    )
+    # echo=True le cuelga a SQLAlchemy un handler a stdout que no se quita
+    # solo: se retira al acabar para no ensuciar el resto de la suite.
+    logger_engine = logging.getLogger("sqlalchemy.engine.Engine")
+    handlers_previos = list(logger_engine.handlers)
+    engine = crear_engine(config)
+    try:
+        with caplog.at_level(logging.DEBUG):
+            async with engine.connect() as conexion:
+                await conexion.execute(text("SELECT 'marca-aud-012'"))
+    finally:
+        await engine.dispose()
+        for handler in list(logger_engine.handlers):
+            if handler not in handlers_previos:
+                logger_engine.removeHandler(handler)
+    assert ("marca-aud-012" in caplog.text) is sql_en_el_log
 
 
 @pytest.mark.parametrize(
