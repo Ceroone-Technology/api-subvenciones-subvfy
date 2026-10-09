@@ -145,7 +145,19 @@ def _otra_clave(usuario_id: int) -> str:
     )
 
 
-TOKENS_QUE_NO_VALEN = [_caducado, _manipulado, _hs512, _alg_none, _otra_clave]
+def _sin(claim: str):
+    """Token bien firmado al que le falta un claim obligatorio."""
+
+    def fabricar(usuario_id: int) -> str:
+        claims = _claims_validos(usuario_id)
+        del claims[claim]
+        return _token_a_mano({"alg": "HS256", "typ": "JWT"}, claims)
+
+    fabricar.__name__ = f"_sin_{claim}"
+    return fabricar
+
+
+TOKENS_QUE_NO_VALEN = [_caducado, _manipulado, _hs512, _alg_none, _otra_clave, _sin("exp"), _sin("iat"), _sin("sub")]
 
 
 @pytest.mark.parametrize("fabricar", TOKENS_QUE_NO_VALEN)

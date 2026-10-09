@@ -93,7 +93,14 @@ def leer_token(token: str, tipo_esperado: str) -> int:
     try:
         # Lista explícita de algoritmos: sin ella, la cabecera del token
         # elegiría con qué se verifica (alg none, confusión de algoritmos).
-        payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+        # Claims obligatorios: sin `exp`, un token firmado con nuestra clave no
+        # caducaría nunca. Todos los que emitimos los llevan.
+        payload = jwt.decode(
+            token,
+            settings.jwt_secret_key,
+            algorithms=[settings.jwt_algorithm],
+            options={"require": ["exp", "iat", "sub"]},
+        )
     except jwt.InvalidTokenError as exc:
         raise TokenInvalido(str(exc)) from exc
 
