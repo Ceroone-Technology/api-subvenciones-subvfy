@@ -111,7 +111,9 @@ class Settings(BaseSettings):
             secreto = datos.get("jwt_secret_key")
             if not secreto:
                 raise ValueError(f"Falta JWT_SECRET_KEY: es obligatoria; {_COMO_GENERAR_SECRETO}")
-            if isinstance(secreto, str) and len(secreto) < JWT_SECRET_KEY_MIN_CARACTERES:
+            # La longitud se mide sin los espacios de los extremos: 40 espacios
+            # no son un secreto de 40 caracteres.
+            if isinstance(secreto, str) and len(secreto.strip()) < JWT_SECRET_KEY_MIN_CARACTERES:
                 raise ValueError(
                     f"JWT_SECRET_KEY debe tener al menos {JWT_SECRET_KEY_MIN_CARACTERES} caracteres; "
                     f"{_COMO_GENERAR_SECRETO}"
@@ -120,7 +122,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _rechazar_secretos_publicos_fuera_de_development(self) -> "Settings":
-        if self.environment != "development" and self.jwt_secret_key in JWT_SECRETOS_PUBLICOS:
+        # strip: un espacio pegado al valor de .env.example no lo convierte en otro secreto.
+        if self.environment != "development" and self.jwt_secret_key.strip() in JWT_SECRETOS_PUBLICOS:
             raise ValueError(
                 f"JWT_SECRET_KEY usa un valor público del repositorio (.env.example o CI) con "
                 f"ENVIRONMENT={self.environment}; {_COMO_GENERAR_SECRETO}"
