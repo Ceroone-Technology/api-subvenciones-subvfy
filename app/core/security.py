@@ -19,7 +19,7 @@ cada petición autenticada. Consecuencias que hay que asumir:
 
 from datetime import UTC, datetime, timedelta
 
-from jose import JWTError, jwt
+import jwt
 from passlib.context import CryptContext
 
 from app.config import settings
@@ -78,8 +78,10 @@ def leer_token(token: str, tipo_esperado: str) -> int:
     como si fuera un access token en los endpoints normales.
     """
     try:
+        # Lista explícita de algoritmos: sin ella, la cabecera del token
+        # elegiría con qué se verifica (alg none, confusión de algoritmos).
         payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
-    except JWTError as exc:
+    except jwt.InvalidTokenError as exc:
         raise TokenInvalido(str(exc)) from exc
 
     if payload.get("tipo") != tipo_esperado:
