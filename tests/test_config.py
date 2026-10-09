@@ -69,6 +69,26 @@ def test_el_error_no_vuelca_los_valores_leidos() -> None:
     assert "password-que-no-debe-salir" not in str(error.value)
 
 
+@pytest.mark.parametrize(
+    "secreto",
+    [" " * 40, "  " + "x" * 31 + "  ", "\t" + "x" * 31 + "\n"],
+    ids=["solo-espacios", "31-con-espacios", "31-con-tab-y-salto"],
+)
+def test_la_longitud_minima_no_cuenta_los_espacios_de_los_extremos(secreto: str) -> None:
+    with pytest.raises(ValidationError, match="JWT_SECRET_KEY"):
+        construir(environment="development", jwt_secret_key=secreto)
+
+
+def test_un_secreto_valido_rodeado_de_espacios_arranca() -> None:
+    construir(environment="production", jwt_secret_key="  " + "x" * JWT_SECRET_KEY_MIN_CARACTERES + "  ")
+
+
+@pytest.mark.parametrize("secreto_publico", [JWT_SECRET_KEY_EJEMPLO, JWT_SECRET_KEY_CI])
+def test_un_secreto_publico_con_espacios_tampoco_arranca_fuera_de_development(secreto_publico: str) -> None:
+    with pytest.raises(ValidationError, match="JWT_SECRET_KEY"):
+        construir(environment="production", jwt_secret_key=f" {secreto_publico} ")
+
+
 def test_un_secreto_de_32_caracteres_arranca() -> None:
     secreto = "x" * JWT_SECRET_KEY_MIN_CARACTERES
     assert construir(environment="production", jwt_secret_key=secreto).jwt_secret_key == secreto

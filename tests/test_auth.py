@@ -2,9 +2,9 @@
 
 from datetime import UTC, datetime, timedelta
 
+import jwt
 import pytest
 from httpx import AsyncClient
-from jose import jwt
 from sqlalchemy import select
 
 from app.api.routes import auth as auth_router

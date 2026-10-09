@@ -6,13 +6,12 @@ alembic==1.14.0
 pydantic==2.10.4
 pydantic-settings==2.7.0
 email-validator==2.2.0
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
-# bcrypt fijado a 4.x a propósito: passlib 1.7.4 no arranca su backend con
-# bcrypt >= 5.0 (falla en la deteccion de backend con "password cannot be
-# longer than 72 bytes"). passlib[bcrypt] no pone techo, asi que sin este
-# pin un build limpio instala bcrypt 5.x y el hashing de contraseñas revienta.
-bcrypt==4.2.1
+# PyJWT en vez de python-jose (AUD-004): jose arrastraba avisos sin arreglo,
+# suyos y de ecdsa. Sin extra [crypto]: HS256 no necesita cryptography.
+PyJWT==2.15.0
+# bcrypt directo, sin passlib (sin mantenimiento desde 2020). Desde la 5.0
+# lanza ValueError con más de 72 bytes en vez de truncar: ver security.py.
+bcrypt==5.0.0
 anthropic==0.42.0
 # Cliente de Amazon SES para las notificaciones de alertas. En Lambda ya
 # viene en el runtime, pero se fija igualmente para que local y CI coincidan.
