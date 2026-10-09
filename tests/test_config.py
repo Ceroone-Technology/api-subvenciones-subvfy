@@ -8,6 +8,7 @@ proceso, para que lo que se pruebe sea lo que dice cada test y nada más.
 """
 
 import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -175,10 +176,13 @@ def test_los_valores_publicos_son_los_del_repositorio(archivo: str, linea: str) 
     constantes, el rechazo fuera de development dejaría de cubrirlo.
 
     Dentro del contenedor de desarrollo se salta: .dockerignore deja fuera
-    .env.* y .github. Donde corre de verdad es en el CI, con el repo entero.
+    .env.* y .github. En el CI (GitHub Actions define CI=true) el repo está
+    entero, así que ahí un archivo ausente es un fallo, no un salto.
     """
     ruta = Path(__file__).resolve().parent.parent / archivo
     if not ruta.exists():
+        if os.environ.get("CI"):
+            pytest.fail(f"{archivo} no está en la copia del CI")
         pytest.skip(f"{archivo} no está en esta copia (imagen de desarrollo)")
     lineas = [linea_leida.strip() for linea_leida in ruta.read_text(encoding="utf-8").splitlines()]
     assert linea in lineas
