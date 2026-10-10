@@ -150,6 +150,18 @@ Decisión reabierta con motivo y cerrada con el usuario: **PyJWT** sustituye a p
   - **`verificar_password` sí corta a 72 bytes antes de `checkpw`**, igual que passlib. No es un descuido: es lo que permite entrar a quien se dio de alta con más de 72 bytes antes del cambio, y lo que evita un 500 en el login. Por eso `LoginRequest` **no** valida bytes. Lo fijan `test_un_hash_de_passlib_de_mas_de_72_bytes_sigue_verificando_con_la_password_entera` y `test_quien_se_dio_de_alta_con_mas_de_72_bytes_sigue_entrando`.
 - **Gotcha de tests**: `test_security.py` fabrica los tokens inválidos (caducado, manipulado, HS512, `alg: none`, otra clave) con `hmac` de la biblioteca estándar, **no** con PyJWT, para que el test no dependa de la librería que vigila. `test_auth.py` sí usa `jwt.encode` de PyJWT en dos tests; el de "otra clave" emite un `InsecureKeyLengthWarning` (clave de 30 bytes) que es esperado.
 
+## FastAPI y Starlette 1.x (AUD-004, ticket 9)
+
+`fastapi==0.141.1` y `starlette==1.7.0`, más `pytest==9.0.3` y `pytest-asyncio==1.3.0`. Starlette se fija **aparte** en `requirements.txt`: fastapi solo exige `starlette>=0.46`, sin techo, y sin ese pin cada build instalaría la última.
+
+- **Arranque y apagado, siempre con `lifespan`** (`app/main.py`). En Starlette 1.x ya no existen `on_event`, `on_startup`/`on_shutdown`, `add_event_handler`, `@app.route`, `@app.middleware` ni `@app.exception_handler`: middleware con `add_middleware` y manejadores con `exception_handlers=` o los de FastAPI.
+- **Constantes de estado con los nombres del RFC 9110**: `HTTP_422_UNPROCESSABLE_CONTENT`, `HTTP_413_CONTENT_TOO_LARGE`… Los nombres antiguos siguen existiendo pero lanzan `StarletteDeprecationWarning`.
+- **`strict_content_type` está activado** (el valor por defecto de FastAPI desde la 0.132) y se queda así: un body JSON que llega sin `Content-Type: application/json` (o un `+json`) recibe 422. Angular `HttpClient` ya la manda; si algún cliente no lo hace, se arregla en el cliente, no apagando la comprobación.
+- **La salida de las dependencias con `yield` (`get_db`) se ejecuta después de enviar la respuesta**, no antes. Los endpoints hacen `commit` antes de devolver, así que no cambia nada; no muevas un `commit` a la salida de la dependencia contando con que la respuesta lo espera.
+- **Los tests usan `httpx.AsyncClient` + `ASGITransport`**, no el `TestClient` de Starlette. En la 1.7 el `TestClient` todavía funciona con `httpx`, pero lo da por obsoleto y pide el paquete `httpx2`: no lo uses, ni añadas `httpx2`, sin decidirlo antes.
+- **pytest-asyncio 1.x ya no tiene el fixture `event_loop`.** Seguimos con `asyncio_mode = auto` y bucle por función (`pytest.ini`).
+- **pip-audit corre en el CI, informativo** (`continue-on-error`), sobre `requirements-dev.txt`, con el resultado en el resumen del job. Se instala solo en ese paso (`pip-audit==2.10.1`), no en la imagen. El `pip` de la imagen de desarrollo (25.0.1) tiene avisos y se acepta a sabiendas: va con AUD-019 / Hito 7.
+
 ## Autenticación y permisos (desde Hito 2, Funcionalidad 4)
 
 Decisiones cerradas en esta funcionalidad, con el usuario, no a criterio propio — no las reabras sin preguntar:
