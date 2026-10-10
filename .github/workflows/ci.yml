@@ -58,3 +58,25 @@ jobs:
 
       - name: pytest
         run: python -m pytest -q
+
+      # Informativo: un aviso publicado hoy no debe parar un PR que no lo ha
+      # causado. El paso sale en rojo, pero el job sigue en verde, y el
+      # resultado queda en el resumen del job.
+      - name: pip-audit (informativo)
+        continue-on-error: true
+        run: |
+          python -m venv /tmp/pip-audit
+          /tmp/pip-audit/bin/pip install --quiet pip-audit==2.10.1
+          set +e
+          salida=$(/tmp/pip-audit/bin/pip-audit -r requirements-dev.txt 2>&1)
+          codigo=$?
+          set -e
+          echo "$salida"
+          {
+            echo "## pip-audit (requirements-dev.txt, incluye requirements.txt)"
+            echo
+            echo '```'
+            echo "$salida"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $codigo
