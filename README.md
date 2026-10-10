@@ -482,7 +482,7 @@ docker compose exec api ruff check .
 docker compose exec api mypy app
 ```
 
-Son las mismas comprobaciones que ejecuta el CI en cada PR: si fallan aquí, el PR no se podrá mergear. Ojo: el CI usa Python 3.11 y la imagen de Docker 3.12, así que evita la sintaxis exclusiva de 3.12.
+Son las mismas comprobaciones que ejecuta el CI en cada PR: si fallan aquí, el PR no se podrá mergear. El CI, la imagen de Docker y ruff/mypy usan la misma versión de Python (3.12); si se cambia, se cambian las tres a la vez.
 
 Los tests de endpoints escriben en una base de datos real (no mocks) y limpian
 sus filas al terminar; para poder distinguirlas usan NIFs con prefijo `TEST-` y

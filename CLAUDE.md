@@ -18,6 +18,7 @@ FastAPI + SQLAlchemy 2.0 (async) + Alembic + Pydantic v2, sobre PostgreSQL vía 
 - **Base de datos**: **Railway PostgreSQL** (no RDS, no DynamoDB) — mismo `DATABASE_URL`/asyncpg sin cambios de código. Se descartó DynamoDB porque el modelo es relacional y normalizado (14 tablas, FKs) — migrarlo sería tirar el diseño ya hecho.
 - **Motor de Alertas**: en Lambda no tiene sentido `APScheduler` en proceso (no hay estado entre invocaciones) — se reemplaza por una función Lambda propia disparada por **EventBridge Scheduler**.
 - **`NullPool` en `app/database.py` es intencional**: no es solo para tests (evita el bug de asyncpg "attached to a different loop" entre tests), es la config correcta para Lambda, donde un pool de conexiones persistente no aporta nada porque el runtime puede cambiar de event loop entre invocaciones. No lo cambies a un pool con conexiones persistentes sin volver a evaluar esto.
+- **Runtime: `python3.12`**, la misma versión que CI, imagen y herramientas. Corre sobre Amazon Linux 2023 y AWS lo depreca el 31/10/2028; `python3.11` va sobre Amazon Linux 2, fuera de soporte desde el 30/06/2026 (AWS solo le aplica parches críticos hasta deprecarlo en junio de 2027). Subir a 3.13 o 3.14 (soporte hasta junio de 2029) queda como decisión del Hito 7, no tomada: obligaría a mover las tres piezas a la vez y a revalidar las dependencias.
 - Esto se implementa recién en el Hito 7 (Despliegue) del backlog — no bloquea el desarrollo funcional actual.
 
 ## Diseño de base de datos
@@ -75,7 +76,7 @@ Reglas para Claude Code en este repo:
 - Si hay que rebasar una rama ya publicada, pregunta primero y usa `git push --force-with-lease`, nunca `--force` a secas.
 - Antes de abrir el PR, corre en local lo mismo que el CI (ver la sección siguiente). Así no descubres en el PR lo que podías ver antes.
 
-**Ojo con la versión de Python**: el CI usa **Python 3.11**, mientras que el `Dockerfile` usa 3.12 y `pyproject.toml` apunta a `py312`. Que algo pase en local no garantiza que pase en el CI. No uses sintaxis exclusiva de 3.12 (p. ej. `type X = ...` o genéricos PEP 695), aunque ruff la sugiera.
+**Versión de Python: 3.12 en todas partes.** El CI (`ci.yml`), el `Dockerfile` y `pyproject.toml` (ruff y mypy) usan la misma versión; si se cambia, se cambian las tres a la vez.
 
 ## Cómo correr y verificar
 
