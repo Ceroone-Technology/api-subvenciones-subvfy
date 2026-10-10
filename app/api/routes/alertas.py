@@ -86,7 +86,7 @@ async def actualizar_alerta(
     except servicio.AlertaNoEncontrada as exc:
         raise _NO_ENCONTRADA from exc
     except servicio.RangoFechasInvalido as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
 
 @router.get(

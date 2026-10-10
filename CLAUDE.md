@@ -110,6 +110,8 @@ Decisiones cerradas con el usuario tras la auditoría del 06/10 — no las relaj
 - **El echo de SQL depende solo de `DATABASE_ECHO`** (`false` por defecto, también en development), nunca del entorno: vuelca cada sentencia con sus parámetros, hashes de contraseña incluidos. El engine se construye con `crear_engine(settings)` en `app/database.py` para poder probarlo con una configuración propia; `NullPool` no cambia.
 - **Fuera de este cambio, a propósito**: `ANTHROPIC_API_KEY` (hacerla obligatoria cuando el Hito 5 la use) y `DATABASE_URL` (su valor por defecto lleva credenciales; se resuelve con el gestor de secretos del Hito 7).
 
+**Pendiente, no decidido — el 422 devuelve lo recibido, contraseñas incluidas**: los errores de validación de Pydantic llevan el valor recibido en el campo `input` de cada error. En `POST /auth/login` con un body que no valida (por ejemplo, sin `Content-Type: application/json`), `input` es el body entero con la contraseña en claro; en el alta o el `PATCH` de usuario, la contraseña que no pasa el schema. Solo vuelve a quien hizo la petición, pero un proxy, un API Gateway o un log que guarde respuestas lo capturaría. No es nuevo: Pydantic v2 ya lo hacía, y FastAPI 0.141 solo lo documenta en el OpenAPI. Queda como ticket aparte, de la familia de AUD-012 (lo que acaba en los logs). Ahí se decidirá si se quita `input` de los 422 en general o solo en los endpoints con contraseña (un manejador de `RequestValidationError`).
+
 **Gotcha de despliegue (Hito 7)**: **`alembic` también carga `Settings`** (`alembic/env.py` importa `app.config.settings` para leer `DATABASE_URL`), así que **una migración sin `JWT_SECRET_KEY` no arranca**, aunque no firme ningún token. El paso de migraciones del despliegue necesita el mismo secreto (y el mismo `ENVIRONMENT`) que la Lambda, o un valor válido propio.
 
 **Gotcha de tests**: los tests de `tests/test_config.py` construyen su propio `Settings(_env_file=None)` y borran con `monkeypatch` las variables que inyectan docker compose y el CI; no usan el `settings` global, que ya se creó al importar la app. El resto de la suite saca el secreto del entorno del contenedor (`env_file: .env`) o del bloque `env:` del workflow, sin tocar `conftest.py`.
@@ -149,6 +151,18 @@ Decisión reabierta con motivo y cerrada con el usuario: **PyJWT** sustituye a p
   - Ahora el alias `Password` (alta y `PATCH` de usuario) valida **bytes UTF-8** y da 422, y la CLI hace lo mismo con su `SystemExit`. `hashear_password` **no corta**: si le llega algo más largo, lanza.
   - **`verificar_password` sí corta a 72 bytes antes de `checkpw`**, igual que passlib. No es un descuido: es lo que permite entrar a quien se dio de alta con más de 72 bytes antes del cambio, y lo que evita un 500 en el login. Por eso `LoginRequest` **no** valida bytes. Lo fijan `test_un_hash_de_passlib_de_mas_de_72_bytes_sigue_verificando_con_la_password_entera` y `test_quien_se_dio_de_alta_con_mas_de_72_bytes_sigue_entrando`.
 - **Gotcha de tests**: `test_security.py` fabrica los tokens inválidos (caducado, manipulado, HS512, `alg: none`, otra clave) con `hmac` de la biblioteca estándar, **no** con PyJWT, para que el test no dependa de la librería que vigila. `test_auth.py` sí usa `jwt.encode` de PyJWT en dos tests; el de "otra clave" emite un `InsecureKeyLengthWarning` (clave de 30 bytes) que es esperado.
+
+## FastAPI y Starlette 1.x (AUD-004, ticket 9)
+
+`fastapi==0.141.1` y `starlette==1.7.0`, más `pytest==9.0.3` y `pytest-asyncio==1.3.0`. Starlette se fija **aparte** en `requirements.txt`: fastapi solo exige `starlette>=0.46`, sin techo, y sin ese pin cada build instalaría la última.
+
+- **Arranque y apagado, siempre con `lifespan`** (`app/main.py`). En Starlette 1.x ya no existen `on_event`, `on_startup`/`on_shutdown`, `add_event_handler`, `@app.route`, `@app.middleware` ni `@app.exception_handler`: middleware con `add_middleware` y manejadores con `exception_handlers=` o los de FastAPI.
+- **Constantes de estado con los nombres del RFC 9110**: `HTTP_422_UNPROCESSABLE_CONTENT`, `HTTP_413_CONTENT_TOO_LARGE`… Los nombres antiguos siguen existiendo pero lanzan `StarletteDeprecationWarning`.
+- **`strict_content_type` está activado** (el valor por defecto de FastAPI desde la 0.132) y se queda así: un body JSON que llega sin `Content-Type: application/json` (o un `+json`) recibe 422. Angular `HttpClient` ya la manda; si algún cliente no lo hace, se arregla en el cliente, no apagando la comprobación.
+- **La salida de las dependencias con `yield` (`get_db`) se ejecuta después de enviar la respuesta**, no antes. Los endpoints hacen `commit` antes de devolver, así que no cambia nada; no muevas un `commit` a la salida de la dependencia contando con que la respuesta lo espera.
+- **Los tests usan `httpx.AsyncClient` + `ASGITransport`**, no el `TestClient` de Starlette. En la 1.7 el `TestClient` todavía funciona con `httpx`, pero lo da por obsoleto y pide el paquete `httpx2`: no lo uses, ni añadas `httpx2`, sin decidirlo antes.
+- **pytest-asyncio 1.x ya no tiene el fixture `event_loop`.** Seguimos con `asyncio_mode = auto` y bucle por función (`pytest.ini`).
+- **pip-audit corre en el CI, informativo** (`continue-on-error`), sobre `requirements-dev.txt`, con el resultado en el resumen del job. Se instala solo en ese paso (`pip-audit==2.10.1`), no en la imagen. El `pip` de la imagen de desarrollo (25.0.1) tiene avisos y se acepta a sabiendas: va con AUD-019 / Hito 7.
 
 ## Autenticación y permisos (desde Hito 2, Funcionalidad 4)
 
