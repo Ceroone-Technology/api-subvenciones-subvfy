@@ -1,4 +1,8 @@
-fastapi==0.115.6
+fastapi==0.141.1
+# Starlette fijada aparte: fastapi solo exige starlette>=0.46, sin techo, así
+# que sin este pin cada build instalaría la última. 1.7.0 cierra los avisos
+# de 0.41.3 (AUD-004).
+starlette==1.7.0
 uvicorn[standard]==0.34.0
 sqlalchemy[asyncio]==2.0.36
 asyncpg==0.30.0
