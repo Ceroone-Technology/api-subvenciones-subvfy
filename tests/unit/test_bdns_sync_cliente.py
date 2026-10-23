@@ -1,8 +1,8 @@
-"""Sync client of the BDNS (PR2 of `bdns-local-sync`, tasks 2.1-2.3).
+"""Cliente de sincronización de la BDNS (PR2 de `bdns-local-sync`, tareas 2.1-2.3).
 
-The BDNS is never called: an `httpx.MockTransport` serves recorded fixtures
-(`tests/fixtures/bdns/`) and the clock/sleep/jitter are injected, so throttle,
-backoff and breaker are tested without waiting.
+Nunca se llama a la BDNS: un `httpx.MockTransport` sirve fixtures grabadas
+(`tests/fixtures/bdns/`) y el reloj, la espera y el jitter se inyectan, de modo
+que throttle, backoff y breaker se prueban sin esperar.
 """
 
 from datetime import date
@@ -16,7 +16,7 @@ from tests.fixtures_bdns import cargar_fixture
 
 
 class RelojFalso:
-    """Monotonic clock whose `dormir` advances time instead of waiting."""
+    """Reloj monotónico cuyo `dormir` avanza el tiempo en vez de esperar."""
 
     def __init__(self) -> None:
         self.ahora = 1000.0
@@ -31,7 +31,7 @@ class RelojFalso:
 
 
 class Servidor:
-    """MockTransport handler that records requests (and when they arrived)."""
+    """Manejador de MockTransport que registra las peticiones (y cuándo llegaron)."""
 
     def __init__(self, reloj: RelojFalso, respuestas: list[httpx.Response | Exception]) -> None:
         self.reloj = reloj
@@ -76,7 +76,7 @@ def llamar_listado(cliente: ClienteBdnsSync):  # noqa: ANN201
     return cliente.listar_pagina(date(2026, 8, 1), date(2026, 8, 7), pagina=0)
 
 
-# --- 2.1 The list call walks ascending ------------------------------------
+# --- 2.1 El listado recorre en ascendente ------------------------------------
 
 
 async def test_el_listado_pide_direccion_asc_y_se_parsea_la_fixture_grabada() -> None:
@@ -121,13 +121,13 @@ def test_orden_de_fechas_distingue_asc_desc_mixto_y_constante(fechas: list[date]
 
 
 def test_la_pagina_grabada_tiene_todas_las_fechas_iguales() -> None:
-    """The recorded page cannot prove the order, which is why the guarded live
-    check (`scripts/check_bdns_asc.py`) exists."""
+    """La página grabada no puede demostrar el orden, y por eso existe la
+    comprobación en vivo protegida (`scripts/check_bdns_asc.py`)."""
     fechas = [date.fromisoformat(f["fechaRecepcion"]) for f in cargar_fixture("busqueda_real.json")["content"]]
     assert orden_de_fechas(fechas) == "constante"
 
 
-# --- Defaults of the real client ------------------------------------------
+# --- Valores por defecto del cliente real ------------------------------------------
 
 
 def test_el_cliente_por_defecto_lleva_timeouts_y_user_agent_de_la_spec() -> None:
@@ -139,7 +139,7 @@ def test_el_cliente_por_defecto_lleva_timeouts_y_user_agent_de_la_spec() -> None
     assert interno.headers["Accept"] == "application/json"
 
 
-# --- 2.2 Token bucket -----------------------------------------------------
+# --- 2.2 Cubo de tokens -----------------------------------------------------
 
 
 async def test_el_throttle_separa_las_peticiones_al_menos_1_sobre_rps() -> None:
@@ -151,7 +151,7 @@ async def test_el_throttle_separa_las_peticiones_al_menos_1_sobre_rps() -> None:
     huecos = [b - a for a, b in zip(servidor.instantes, servidor.instantes[1:], strict=False)]
     assert len(huecos) == 5
     assert all(hueco >= 1 / 3 - 1e-6 for hueco in huecos)
-    assert servidor.instantes[1] - servidor.instantes[0] < 0.5  # no more than needed
+    assert servidor.instantes[1] - servidor.instantes[0] < 0.5  # sin esperar de más
 
 
 @pytest.mark.parametrize(("pedido", "efectivo"), [(10.0, 4.0), (0.5, 2.0), (3.0, 3.0)])
@@ -173,7 +173,7 @@ async def test_el_primer_request_no_espera() -> None:
     assert reloj.esperas == []
 
 
-# --- 2.2 Retry and backoff ------------------------------------------------
+# --- 2.2 Reintentos y backoff ------------------------------------------------
 
 
 async def test_429_se_reintenta_con_backoff_y_acaba_bien() -> None:
@@ -186,7 +186,7 @@ async def test_429_se_reintenta_con_backoff_y_acaba_bien() -> None:
     assert len(pagina.convocatorias) == 3
     assert len(servidor.peticiones) == 3
     assert cliente.peticiones == 3
-    # 2 s, then 4 s (the bucket refill is shorter than the backoff, so it adds nothing)
+    # 2 s y luego 4 s (la recarga del cubo es menor que el backoff, así que no suma)
     assert reloj.esperas == [2.0, 4.0]
 
 
@@ -226,16 +226,36 @@ async def test_el_jitter_se_suma_al_backoff() -> None:
 
     await llamar_listado(cliente)
 
-    assert reloj.esperas == [2.5]  # 2 s + 25 % of jitter
+    assert reloj.esperas == [2.5]  # 2 s + 25 % de jitter
 
 
 async def test_el_backoff_dobla_y_se_acota_a_60_segundos() -> None:
-    cliente, _, reloj = crear([httpx.Response(500)], intentos=8, umbral_breaker=99)
+    cliente, _, reloj = crear([httpx.Response(500)], intentos=8, umbral_breaker=99, espera_max_total=1000.0)
 
     with pytest.raises(BdnsNoDisponible):
         await llamar_listado(cliente)
 
     assert reloj.esperas == [2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]
+
+
+async def test_un_retry_after_enorme_se_acota_a_60_segundos() -> None:
+    cliente, _, reloj = crear([httpx.Response(429, headers={"Retry-After": "3600"}), ok()])
+
+    await llamar_listado(cliente)
+
+    assert reloj.esperas == [60.0]
+
+
+async def test_la_espera_total_de_una_llamada_tiene_presupuesto() -> None:
+    """Con 10 s de presupuesto la llamada duerme 2 + 4 + 4 y se rinde: no se
+    acerca al límite de 15 min de la Lambda."""
+    cliente, servidor, reloj = crear([httpx.Response(500)], intentos=8, umbral_breaker=99, espera_max_total=10.0)
+
+    with pytest.raises(BdnsNoDisponible):
+        await llamar_listado(cliente)
+
+    assert reloj.esperas == [2.0, 4.0, 4.0]
+    assert len(servidor.peticiones) == 4
 
 
 @pytest.mark.parametrize("estado", [500, 502, 503, 504, 429])
@@ -294,7 +314,11 @@ async def test_agotados_los_intentos_se_lanza_bdns_no_disponible_con_el_estado()
     assert cliente.peticiones == 4
 
 
-async def test_todos_los_intentos_incluidos_los_reintentos_respetan_el_throttle() -> None:
+async def test_todos_los_intentos_incluidos_los_reintentos_respetan_el_throttle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Sin backoff, solo el throttle puede separar las peticiones.
+    monkeypatch.setattr("app.services.bdns_sync_cliente.ESPERA_BASE_SEGUNDOS", 0.0)
     cliente, servidor, _ = crear(
         [httpx.Response(429, headers={"Retry-After": "0"}), httpx.Response(429), ok()], rps=2.0
     )
@@ -303,7 +327,7 @@ async def test_todos_los_intentos_incluidos_los_reintentos_respetan_el_throttle(
 
     huecos = [b - a for a, b in zip(servidor.instantes, servidor.instantes[1:], strict=False)]
     assert len(servidor.instantes) == 3
-    assert all(hueco >= 0.5 - 1e-6 for hueco in huecos)
+    assert huecos == [pytest.approx(0.5), pytest.approx(0.5)]
 
 
 async def test_un_4xx_no_transitorio_no_se_reintenta() -> None:
@@ -326,7 +350,7 @@ async def test_una_pagina_con_forma_inesperada_falla_sin_reintentar() -> None:
     assert len(servidor.peticiones) == 1
 
 
-# --- 2.2 Circuit breaker --------------------------------------------------
+# --- 2.2 Breaker --------------------------------------------------
 
 
 async def test_el_breaker_salta_tras_k_fallos_consecutivos_y_ya_no_pide_nada() -> None:
@@ -348,8 +372,8 @@ async def test_el_breaker_salta_tras_k_fallos_consecutivos_y_ya_no_pide_nada() -
 
 
 async def test_circuito_abierto_no_es_un_bdns_no_disponible() -> None:
-    """The engine catches `BdnsNoDisponible` per item and keeps going; the
-    breaker must escape that handler to end the run."""
+    """El motor captura `BdnsNoDisponible` por elemento y sigue; el breaker
+    tiene que escapar de ese manejador para terminar la ejecución."""
     assert not issubclass(CircuitoAbierto, BdnsNoDisponible)
 
 
@@ -374,8 +398,8 @@ async def test_un_exito_reinicia_la_cuenta_de_fallos() -> None:
 
 
 async def test_los_reintentos_de_una_misma_llamada_cuentan_como_un_solo_fallo() -> None:
-    """Timeout spec: an item whose retries are exhausted is one failure; the run
-    continues until K such failures."""
+    """Un elemento con los reintentos agotados cuenta como un fallo; la
+    ejecución sigue hasta acumular K fallos así."""
     cliente, servidor, _ = crear([httpx.ReadTimeout("lento")], intentos=4, umbral_breaker=2)
 
     with pytest.raises(BdnsNoDisponible):
@@ -387,7 +411,31 @@ async def test_los_reintentos_de_una_misma_llamada_cuentan_como_un_solo_fallo() 
         await llamar_listado(cliente)
 
 
-# --- 2.2 Detail, catalogs --------------------------------------------------
+async def test_un_200_con_forma_inesperada_cuenta_como_fallo_del_breaker() -> None:
+    cliente, _, _ = crear([ok(["no", "es", "una", "pagina"])], umbral_breaker=2)
+
+    with pytest.raises(BdnsNoDisponible):
+        await llamar_listado(cliente)
+    with pytest.raises(CircuitoAbierto):
+        await llamar_listado(cliente)
+
+
+async def test_un_200_con_forma_inesperada_no_reinicia_la_cuenta_de_fallos() -> None:
+    cliente, _, _ = crear(
+        [httpx.Response(503), ok(["no", "es", "una", "pagina"]), httpx.Response(503)],
+        intentos=1,
+        umbral_breaker=3,
+    )
+
+    with pytest.raises(BdnsNoDisponible):
+        await llamar_listado(cliente)
+    with pytest.raises(BdnsNoDisponible):
+        await llamar_listado(cliente)
+    with pytest.raises(CircuitoAbierto):
+        await llamar_listado(cliente)
+
+
+# --- 2.2 Detalle y catálogos --------------------------------------------------
 
 
 async def test_detalle_pide_num_conv_y_vpd_y_devuelve_el_json() -> None:
@@ -420,6 +468,37 @@ async def test_detalle_vacio_200_con_objeto_vacio_es_none() -> None:
     cliente, _, _ = crear([httpx.Response(200, json={})])
 
     assert await cliente.detalle("000000") is None
+
+
+@pytest.mark.parametrize(
+    "respuesta",
+    [
+        httpx.Response(200, content=b""),
+        httpx.Response(200, text="<html>bloqueo</html>", headers={"content-type": "text/html"}),
+    ],
+)
+async def test_detalle_con_200_vacio_o_html_no_es_retirada_y_lanza(respuesta: httpx.Response) -> None:
+    cliente, _, _ = crear([respuesta], intentos=2)
+
+    with pytest.raises(BdnsNoDisponible):
+        await cliente.detalle("924183")
+
+
+@pytest.mark.parametrize("cuerpo", [[], 0, False, "", ["x"], 7])
+async def test_detalle_con_cuerpo_que_no_es_un_objeto_lanza_y_no_es_retirada(cuerpo: object) -> None:
+    cliente, _, _ = crear([httpx.Response(200, json=cuerpo)])
+
+    with pytest.raises(BdnsNoDisponible):
+        await cliente.detalle("924183")
+
+
+async def test_un_detalle_malformado_cuenta_para_el_breaker() -> None:
+    cliente, _, _ = crear([httpx.Response(200, json=[])], umbral_breaker=2)
+
+    with pytest.raises(BdnsNoDisponible):
+        await cliente.detalle("1")
+    with pytest.raises(CircuitoAbierto):
+        await cliente.detalle("2")
 
 
 async def test_un_404_no_cuenta_para_el_breaker_y_no_se_reintenta() -> None:
@@ -470,7 +549,7 @@ async def test_un_catalogo_que_no_es_una_lista_falla() -> None:
         await cliente.regiones()
 
 
-# --- 2.1 Verdict of the guarded live check --------------------------------
+# --- 2.1 Veredicto de la comprobación en vivo protegida --------------------------------
 
 DESDE = date(2026, 10, 13)
 HASTA = date(2026, 10, 23)
@@ -479,15 +558,15 @@ HASTA = date(2026, 10, 23)
 @pytest.mark.parametrize(
     ("fechas", "hay_mas_paginas", "esperado"),
     [
-        # Strict order inside the page.
+        # Orden estricto dentro de la página.
         ([date(2026, 10, 13), date(2026, 10, 14), date(2026, 10, 14)], False, "asc"),
         ([date(2026, 10, 22), date(2026, 10, 20)], True, "desc"),
-        # Observed live on 22/10/2026: 20 rows, all on the window start, 126 pages.
+        # Observado en vivo el 22/10/2026: 20 filas, todas en el inicio de la ventana, 126 páginas.
         ([DESDE] * 20, True, "asc"),
         ([HASTA] * 20, True, "desc"),
-        # A constant page in the middle of the window proves nothing.
+        # Una página constante en mitad de la ventana no demuestra nada.
         ([date(2026, 10, 18)] * 20, True, "indeterminado"),
-        # A single page on the window edge could be the whole window.
+        # Una única página en el borde de la ventana podría ser la ventana entera.
         ([DESDE] * 5, False, "indeterminado"),
         ([date(2026, 10, 14), date(2026, 10, 13), date(2026, 10, 15)], True, "indeterminado"),
         ([], False, "indeterminado"),
@@ -495,3 +574,23 @@ HASTA = date(2026, 10, 23)
 )
 def test_inferir_direccion_con_una_sola_pagina(fechas: list[date], hay_mas_paginas: bool, esperado: str) -> None:
     assert inferir_direccion(fechas, DESDE, HASTA, hay_mas_paginas=hay_mas_paginas) == esperado
+
+
+# --- 2.1 Script de comprobación en vivo --------------------------------------
+
+
+def test_una_excepcion_inesperada_del_script_no_sale_con_el_codigo_del_veredicto_desc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = pytest.importorskip("scripts.check_bdns_asc")
+    monkeypatch.setenv("BDNS_LIVE_CHECK", "1")
+
+    async def revienta() -> int:
+        raise RuntimeError("fallo inesperado")
+
+    monkeypatch.setattr(script, "comprobar", revienta)
+
+    codigo = script.main()
+
+    assert codigo == script.SALIDA_ERROR_INESPERADO
+    assert codigo not in (0, 1, 2, 3)

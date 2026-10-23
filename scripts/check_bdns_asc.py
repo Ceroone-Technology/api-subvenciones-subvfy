@@ -21,7 +21,8 @@ Pide la primera página de los últimos 10 días en orden ascendente y decide co
   y no solo por el número de página.
 - `indeterminado`: no concluye. Repetir con otra ventana.
 
-Código de salida: 0 asc, 1 desc, 2 no concluyente, 3 error o sin permiso.
+Código de salida: 0 asc, 1 desc, 2 no concluyente, 3 error de la BDNS o sin permiso,
+4 excepción inesperada (nunca se confunde con el veredicto `desc`).
 """
 
 import asyncio
@@ -34,6 +35,7 @@ from app.services.bdns_sync_cliente import CircuitoAbierto, ClienteBdnsSync, inf
 
 VENTANA_DIAS = 10
 TAMANO = 20
+SALIDA_ERROR_INESPERADO = 4
 
 
 async def comprobar() -> int:
@@ -66,7 +68,11 @@ def main() -> int:
     if os.environ.get("BDNS_LIVE_CHECK") != "1":
         print("Desactivado: define BDNS_LIVE_CHECK=1 para hacer UNA petición real a la BDNS.")
         return 3
-    return asyncio.run(comprobar())
+    try:
+        return asyncio.run(comprobar())
+    except Exception as exc:
+        print(f"ERROR inesperado: {exc!r}")
+        return SALIDA_ERROR_INESPERADO
 
 
 if __name__ == "__main__":

@@ -9,10 +9,13 @@ sin que nos bloquee, y por eso hace cuatro cosas que el otro no:
   del WAF), así que ir más despacio es parte del contrato.
 - **Reintentos** con espera exponencial (`2 s · 2^n` + jitter, tope 60 s) ante
   429, 5xx, timeouts, errores de transporte y **200 que no es JSON**. Se
-  respeta `Retry-After` en segundos.
+  respeta `Retry-After` en segundos (con tope), y cada llamada tiene un
+  presupuesto de espera total (60 s por defecto) para no acercarse al límite
+  de 15 min de la Lambda.
 - **Breaker**: tras K llamadas seguidas que fallan (ya sin reintentos) lanza
   `CircuitoAbierto` y el motor termina la ejecución en `failed`, conservando el
-  cursor. Una llamada que sale bien reinicia la cuenta.
+  cursor. Una llamada que sale bien reinicia la cuenta, y "sale bien" incluye
+  que la forma de la respuesta sea la esperada: un 200 con otro JSON es un fallo.
 - **Orden ascendente** por `fechaRecepcion` (D8): los inserts nuevos se añaden
   al final y la página N no se mueve entre ejecuciones.
 
@@ -27,7 +30,7 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import date
 from types import TracebackType
-from typing import Any, Literal, Self
+from typing import Any, Literal, NoReturn, Self
 
 import httpx
 
@@ -57,7 +60,9 @@ ESPERA_MAX_SEGUNDOS = 60.0
 # Fracción del backoff que puede añadir el jitter.
 JITTER = 0.25
 # Tope a lo que se obedece de un `Retry-After`: no nos dormimos 1 h por un header.
-RETRY_AFTER_MAX_SEGUNDOS = 300.0
+RETRY_AFTER_MAX_SEGUNDOS = ESPERA_MAX_SEGUNDOS
+# Presupuesto de espera acumulada de una sola llamada (todos sus reintentos).
+ESPERA_TOTAL_MAX_SEGUNDOS = 60.0
 
 TIMEOUT_CONEXION = 5.0
 TIMEOUT_LECTURA = 30.0
@@ -154,6 +159,7 @@ class ClienteBdnsSync:
         rps: float = RPS_POR_DEFECTO,
         intentos: int = INTENTOS_POR_DEFECTO,
         umbral_breaker: int = UMBRAL_BREAKER_POR_DEFECTO,
+        espera_max_total: float = ESPERA_TOTAL_MAX_SEGUNDOS,
         vpd: str = VPD,
         reloj: Callable[[], float] = time.monotonic,
         dormir: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -168,6 +174,7 @@ class ClienteBdnsSync:
         self._cubo = _CuboDeTokens(max(RPS_MIN, min(RPS_MAX, rps)), reloj, dormir)
         self._intentos = max(1, intentos)
         self._umbral = max(1, umbral_breaker)
+        self._espera_max_total = max(0.0, espera_max_total)
         self._vpd = vpd
         self._dormir = dormir
         self._aleatorio = aleatorio
@@ -225,11 +232,13 @@ class ClienteBdnsSync:
         }
         cuerpo = await self._pedir(RUTA_BUSQUEDA, parametros)
         try:
-            return _leer_pagina(cuerpo, pagina)
-        except BdnsNoDisponible:
-            raise
+            resultado = _leer_pagina(cuerpo, pagina)
+        except BdnsNoDisponible as exc:
+            self._fallar(exc)
         except (KeyError, TypeError, ValueError) as exc:
-            raise BdnsNoDisponible(f"La BDNS devolvió una página con forma inesperada: {exc!r}.") from exc
+            self._fallar(BdnsNoDisponible(f"La BDNS devolvió una página con forma inesperada: {exc!r}."))
+        self._fallos_seguidos = 0
+        return resultado
 
     async def detalle(self, codigo_bdns: str) -> dict[str, Any] | None:
         """Detalle de una convocatoria, o `None` si la BDNS dice que no existe.
@@ -237,12 +246,15 @@ class ClienteBdnsSync:
         404, 204 y un JSON `null` o `{}` significan "no existe" (retirada). Un
         200 con el cuerpo vacío **no**: no es JSON, y es lo que devuelve el WAF
         a veces; marcar como retirada por eso sería borrar datos por un bloqueo.
+        Igual con `[]`, `0`, `false` o cualquier cuerpo que no sea un objeto.
         """
         cuerpo = await self._pedir(RUTA_DETALLE, {"numConv": codigo_bdns, "vpd": self._vpd}, vacio_si_no_existe=True)
-        if not cuerpo:
+        if cuerpo is None or cuerpo == {}:
+            self._fallos_seguidos = 0
             return None
         if not isinstance(cuerpo, dict):
-            raise BdnsNoDisponible("La BDNS devolvió un detalle que no es un objeto JSON.")
+            self._fallar(BdnsNoDisponible("La BDNS devolvió un detalle que no es un objeto JSON."))
+        self._fallos_seguidos = 0
         return cuerpo
 
     async def organos(self, nivel: NivelAdmon) -> list[dict[str, Any]]:
@@ -254,7 +266,8 @@ class ClienteBdnsSync:
     async def _catalogo(self, ruta: str, parametros: dict[str, str]) -> list[dict[str, Any]]:
         cuerpo = await self._pedir(ruta, parametros)
         if not isinstance(cuerpo, list):
-            raise BdnsNoDisponible(f"La BDNS devolvió un catálogo que no es una lista ({ruta}).")
+            self._fallar(BdnsNoDisponible(f"La BDNS devolvió un catálogo que no es una lista ({ruta})."))
+        self._fallos_seguidos = 0
         return cuerpo
 
     # --- Núcleo: throttle, reintentos, breaker -----------------------------
@@ -264,6 +277,7 @@ class ClienteBdnsSync:
             raise CircuitoAbierto(f"Circuito abierto tras {self._umbral} fallos seguidos de la BDNS.")
 
         error: BdnsNoDisponible | None = None
+        dormido = 0.0
         for intento in range(1, self._intentos + 1):
             await self._cubo.tomar()
             self._peticiones += 1
@@ -294,15 +308,23 @@ class ClienteBdnsSync:
                         error = BdnsNoDisponible(f"La BDNS devolvió algo que no es JSON: {exc}.", status=estado)
                         transitorio = True
                     else:
-                        self._fallos_seguidos = 0
+                        # El breaker se reinicia al validar la forma, no aquí.
                         return cuerpo
 
             if not transitorio or intento == self._intentos:
                 break
-            await self._dormir(self._espera(intento, reintentar_tras))
+            if dormido >= self._espera_max_total:
+                break  # presupuesto de espera agotado: nos rendimos
+            espera = min(self._espera(intento, reintentar_tras), self._espera_max_total - dormido)
+            await self._dormir(espera)
+            dormido += espera
 
-        self._fallos_seguidos += 1
         assert error is not None
+        self._fallar(error)
+
+    def _fallar(self, error: BdnsNoDisponible) -> NoReturn:
+        """Cuenta un fallo (llamada ya sin reintentos o respuesta de forma inesperada)."""
+        self._fallos_seguidos += 1
         if self.circuito_abierto:
             logger.error("BDNS: circuito abierto tras %d fallos seguidos.", self._fallos_seguidos)
             raise CircuitoAbierto(
