@@ -50,6 +50,11 @@ jobs:
       - name: Migraciones (alembic upgrade head)
         run: python -m alembic upgrade head
 
+      # Prueba el downgrade de la última migración (CHECKs y FKs de
+      # auditoría escritos a mano) y deja la base en head para el resto.
+      - name: Migraciones (downgrade -1 y vuelta a head)
+        run: python -m alembic downgrade -1 && python -m alembic upgrade head
+
       - name: ruff
         run: python -m ruff check .
 

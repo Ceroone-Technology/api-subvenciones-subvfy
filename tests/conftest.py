@@ -33,13 +33,18 @@ from app.models import (
     Alerta,
     AlertaEjecucion,
     AlertaEjecucionConvocatoria,
+    CatalogoBdns,
     Convocatoria,
     Empresa,
     Rol,
+    SyncRun,
     Usuario,
 )
 
 NIF_PREFIJO_TEST = "TEST-"
+# Marks the free-text field of `catalogo_bdns` (descripcion) and `sync_run`
+# (error_detalle) so the teardown can find the rows tests created.
+MARCA_TEST = "TEST-"
 # Subdominio de example.com (RFC 2606, nunca entregable) y no un TLD
 # reservado como .test: email-validator, que usa Pydantic para EmailStr,
 # rechaza .test/.invalid/.localhost como direcciones no válidas.
@@ -192,6 +197,24 @@ async def limpiar_datos_de_test() -> AsyncGenerator[None, None]:
             Convocatoria.__table__.update()
             .where(Convocatoria.codigo_bdns.like(f"{CODIGO_BDNS_PREFIJO_TEST}%"))
             .values(created_by=None, updated_by=None)
+        )
+        # El sync firma con el usuario de sistema, que nunca se borra, pero un
+        # test puede firmar con un usuario de prueba: sus filas se borran antes
+        # que los usuarios (FK de auditoría), igual que las marcadas con TEST-.
+        usuarios_firmantes = select(Usuario.id).where(Usuario.email.like(f"%{EMAIL_DOMINIO_TEST}"))
+        await db.execute(
+            delete(CatalogoBdns).where(
+                CatalogoBdns.descripcion.like(f"{MARCA_TEST}%")
+                | CatalogoBdns.created_by.in_(usuarios_firmantes)
+                | CatalogoBdns.updated_by.in_(usuarios_firmantes)
+            )
+        )
+        await db.execute(
+            delete(SyncRun).where(
+                SyncRun.error_detalle.like(f"{MARCA_TEST}%")
+                | SyncRun.created_by.in_(usuarios_firmantes)
+                | SyncRun.updated_by.in_(usuarios_firmantes)
+            )
         )
         # Las alertas no pueden esperar a la cascada del usuario: sus filtros
         # quedan a dos niveles (usuario -> alerta -> alerta_organo) y
