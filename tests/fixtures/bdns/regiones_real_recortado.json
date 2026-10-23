@@ -1,0 +1,153 @@
+[
+  {
+    "children": [
+      {
+        "children": [
+          {
+            "children": [
+              {
+                "children": [],
+                "descripcion": "ES111 - A Coruña",
+                "id": 4
+              },
+              {
+                "children": [],
+                "descripcion": "ES113 - Ourense",
+                "id": 6
+              },
+              {
+                "children": [],
+                "descripcion": "ES112 - Lugo",
+                "id": 5
+              },
+              {
+                "children": [],
+                "descripcion": "ES114 - Pontevedra",
+                "id": 7
+              }
+            ],
+            "descripcion": "ES11 - GALICIA",
+            "id": 3
+          },
+          {
+            "children": [
+              {
+                "children": [],
+                "descripcion": "ES130 - Cantabria",
+                "id": 11
+              }
+            ],
+            "descripcion": "ES13 - CANTABRIA",
+            "id": 10
+          },
+          {
+            "children": [
+              {
+                "children": [],
+                "descripcion": "ES120 - Asturias",
+                "id": 9
+              }
+            ],
+            "descripcion": "ES12 - PRINCIPADO DE ASTURIAS",
+            "id": 8
+          }
+        ],
+        "descripcion": "ES1 - NOROESTE",
+        "id": 2
+      },
+      {
+        "children": [
+          {
+            "children": [
+              {
+                "children": [],
+                "descripcion": "ES300 - Madrid",
+                "id": 27
+              }
+            ],
+            "descripcion": "ES30 - COMUNIDAD DE MADRID",
+            "id": 26
+          }
+        ],
+        "descripcion": "ES3 - COMUNIDAD DE MADRID",
+        "id": 25
+      },
+      {
+        "children": [
+          {
+            "children": [
+              {
+                "children": [],
+                "descripcion": "ES522 - Castellón / Castelló",
+                "id": 56
+              },
+              {
+                "children": [],
+                "descripcion": "ES521 - Alicante / Alacant",
+                "id": 55
+              },
+              {
+                "children": [],
+                "descripcion": "ES523 - Valencia / València",
+                "id": 57
+              }
+            ],
+            "descripcion": "ES52 - COMUNIDAD VALENCIANA",
+            "id": 54
+          },
+          {
+            "children": [
+              {
+                "children": [],
+                "descripcion": "ES514 - Tarragona",
+                "id": 53
+              },
+              {
+                "children": [],
+                "descripcion": "ES511 - Barcelona",
+                "id": 50
+              },
+              {
+                "children": [],
+                "descripcion": "ES512 - Girona",
+                "id": 51
+              },
+              {
+                "children": [],
+                "descripcion": "ES513 - Lleida",
+                "id": 52
+              }
+            ],
+            "descripcion": "ES51 - CATALUÑA",
+            "id": 49
+          },
+          {
+            "children": [
+              {
+                "children": [],
+                "descripcion": "ES531 - Eivissa y Formentera",
+                "id": 59
+              },
+              {
+                "children": [],
+                "descripcion": "ES532 - Mallorca",
+                "id": 60
+              },
+              {
+                "children": [],
+                "descripcion": "ES533 - Menorca",
+                "id": 61
+              }
+            ],
+            "descripcion": "ES53 - ILLES BALEARS",
+            "id": 58
+          }
+        ],
+        "descripcion": "ES5 - ESTE",
+        "id": 48
+      }
+    ],
+    "descripcion": "ES - ESPAÑA ",
+    "id": 1
+  }
+]

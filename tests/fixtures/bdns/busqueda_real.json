@@ -1,0 +1,48 @@
+{
+  "content": [
+    {
+      "id": 1125721,
+      "mrr": false,
+      "numeroConvocatoria": "924160",
+      "descripcion": "SUBVENCION NOMINATIVA COLEGIO ABOGADOS DE OVIEDO",
+      "descripcionLeng": null,
+      "fechaRecepcion": "2026-08-07",
+      "nivel1": "AUTONOMICA",
+      "nivel2": "PRINCIPADO DE ASTURIAS",
+      "nivel3": "CONSEJERÍA DE PRESIDENCIA, RETO DEMOGRÁFICO, IGUALDAD Y TURISMO",
+      "codigoInvente": null
+    },
+    {
+      "id": 1125720,
+      "mrr": false,
+      "numeroConvocatoria": "924159",
+      "descripcion": "Resolución de 6 de agosto de 2026 por la que se concede subvención a Fundación ADSIS para actuaciones dirigidas a la reinserción de personas en situación de drogodependencia, especialmente con regímenes de privación de libertad.",
+      "descripcionLeng": null,
+      "fechaRecepcion": "2026-08-07",
+      "nivel1": "AUTONOMICA",
+      "nivel2": "PRINCIPADO DE ASTURIAS",
+      "nivel3": "CONSEJERÍA DE SALUD",
+      "codigoInvente": null
+    },
+    {
+      "id": 1125719,
+      "mrr": false,
+      "numeroConvocatoria": "924158",
+      "descripcion": "Ley 5/2025 presupuesto 2026",
+      "descripcionLeng": null,
+      "fechaRecepcion": "2026-08-07",
+      "nivel1": "AUTONOMICA",
+      "nivel2": "PRINCIPADO DE ASTURIAS",
+      "nivel3": "CONSEJERÍA DE DERECHOS SOCIALES Y BIENESTAR",
+      "codigoInvente": null
+    }
+  ],
+  "last": false,
+  "totalElements": 647262,
+  "totalPages": 215754,
+  "first": true,
+  "numberOfElements": 3,
+  "size": 3,
+  "number": 0,
+  "empty": false
+}
