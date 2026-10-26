@@ -1,5 +1,6 @@
-"""Detail -> `convocatoria` row mapper (PR2, task 2.4). Pure, no DB, no network."""
+"""Mapeador detalle -> fila de `convocatoria` (PR2, tarea 2.4). Puro, sin BD ni red."""
 
+import json
 from copy import deepcopy
 from datetime import date
 from decimal import Decimal
@@ -9,6 +10,8 @@ import pytest
 
 from app.models import Convocatoria
 from app.services.bdns_mapper import (
+    MAX_BYTES_DETALLE,
+    MAX_ELEMENTOS_LISTA,
     DetalleInvalido,
     RutaOrgano,
     es_plazo_permanente,
@@ -135,7 +138,7 @@ def test_las_fechas_con_hora_se_recortan_a_la_fecha() -> None:
     assert mapear_detalle(detalle)["fecha_fin_solicitud"] == date(2026, 9, 30)
 
 
-# --- Hash -----------------------------------------------------------------
+# --- Hash ------------------------------------------------------------------
 
 
 def test_el_hash_es_estable_y_de_64_hex() -> None:
@@ -167,7 +170,7 @@ def test_el_hash_ignora_campos_que_no_guardamos() -> None:
     assert mapear_detalle(ruido)["contenido_hash"] == mapear_detalle(detalle_real())["contenido_hash"]
 
 
-# --- Organ and regions as inputs of the resolution -------------------------
+# --- Órgano y regiones como entradas de la resolución -----------------------
 
 
 def test_ruta_organo_lee_los_tres_niveles() -> None:
@@ -193,11 +196,16 @@ def test_etiquetas_region_devuelve_las_descripciones_sin_vacias() -> None:
         ("Convocatoria abierta de manera PERMANENTE", None, None, True),
         (None, "Plazo indefinido", None, True),
         (None, "Siempre abierta", None, True),
-        # The recorded "Sin plazo de solicitud" is a direct grant, not an open call.
-        ("Sin plazo de solicitur", "Sin plazo de solicitud", None, False),
+        # El "Sin plazo de solicitud" grabado es una concesión directa, no una convocatoria abierta.
+        ("Sin plazo de solicitud", "Sin plazo de solicitud", None, False),
         (None, None, None, False),
-        # With an end date the call is not permanent whatever the text says.
+        # Con fecha de fin la convocatoria no es permanente, diga lo que diga el texto.
         (None, "Abierto de forma permanente", date(2026, 12, 31), False),
+        # Negaciones: afirman justo lo contrario.
+        (None, "No permanente", None, False),
+        (None, "No es permanente", None, False),
+        ("Plazo no indefinido", None, None, False),
+        (None, "Convocatoria no abierta siempre", None, False),
     ],
 )
 def test_plazo_permanente_solo_si_el_texto_lo_dice_y_no_hay_fecha_fin(
@@ -214,3 +222,115 @@ def test_el_detalle_sin_fechas_pero_permanente_se_marca() -> None:
 
     assert mapear_detalle(detalle)["plazo_permanente"] is True
     assert mapear_detalle(detalle_con_documentos())["plazo_permanente"] is False
+
+
+# --- Robustez ante datos hostiles o mal formados (revisión PR2b1) -----------
+
+
+@pytest.mark.parametrize("valor", [float("nan"), float("inf"), float("-inf"), 2**31, -(2**31) - 1, 10**30])
+def test_bdns_id_no_finito_o_fuera_de_rango_queda_en_none(valor: float) -> None:
+    detalle = detalle_real()
+    detalle["id"] = valor
+
+    assert mapear_detalle(detalle)["bdns_id"] is None
+
+
+def test_bdns_id_en_el_limite_del_integer_se_conserva() -> None:
+    detalle = detalle_real()
+    detalle["id"] = 2**31 - 1
+
+    assert mapear_detalle(detalle)["bdns_id"] == 2**31 - 1
+
+
+@pytest.mark.parametrize("valor", [float("nan"), float("inf"), float("-inf")])
+def test_presupuesto_no_finito_queda_en_none(valor: float) -> None:
+    detalle = detalle_real()
+    detalle["presupuestoTotal"] = valor
+
+    assert mapear_detalle(detalle)["presupuesto_total"] is None
+
+
+def test_se_quita_el_nul_de_textos_y_de_los_json() -> None:
+    detalle = detalle_con_documentos()
+    detalle["descripcion"] = "Ayuda\x00 pyme"
+    detalle["tiposBeneficiarios"] = [{"descripcion": "Pymes\x00"}]
+    detalle["sectores"] = [{"descripcion": "\x00Agro"}]
+    detalle["descripcionBasesReguladoras"] = "Bases\x00 reguladoras"
+
+    fila = mapear_detalle(detalle)
+
+    assert fila["titulo"] == "Ayuda pyme"
+    assert fila["beneficiarios"] == ["Pymes"]
+    assert fila["sectores"] == ["Agro"]
+    assert fila["detalle"]["bases_reguladoras"] == "Bases reguladoras"
+    assert "\x00" not in json.dumps(fila, default=str, ensure_ascii=False)
+
+
+def test_se_acotan_las_listas_del_detalle_y_se_avisa(caplog: pytest.LogCaptureFixture) -> None:
+    detalle = detalle_con_documentos()
+    detalle["documentos"] = [{"id": i, "nombreFic": f"d{i}.pdf"} for i in range(1, MAX_ELEMENTOS_LISTA + 51)]
+    detalle["tiposBeneficiarios"] = [{"descripcion": f"b{i}"} for i in range(MAX_ELEMENTOS_LISTA + 5)]
+
+    with caplog.at_level("WARNING"):
+        fila = mapear_detalle(detalle)
+
+    assert len(fila["detalle"]["documentos"]) == MAX_ELEMENTOS_LISTA
+    assert len(fila["beneficiarios"]) == MAX_ELEMENTOS_LISTA
+    assert "recortad" in caplog.text
+
+
+def test_un_texto_enorme_del_detalle_se_acota_y_se_avisa(caplog: pytest.LogCaptureFixture) -> None:
+    detalle = detalle_con_documentos()
+    detalle["descripcionBasesReguladoras"] = "z" * (MAX_BYTES_DETALLE * 2)
+
+    with caplog.at_level("WARNING"):
+        fila = mapear_detalle(detalle)
+
+    assert len(json.dumps(fila["detalle"], ensure_ascii=False).encode()) <= MAX_BYTES_DETALLE
+    assert "recortad" in caplog.text
+
+
+def test_solo_se_guardan_urls_http_o_https() -> None:
+    detalle = detalle_real()
+    detalle["urlBasesReguladoras"] = "javascript:alert(1)"
+    detalle["sedeElectronica"] = "  https://sede.example/tramite "
+
+    fila = mapear_detalle(detalle)
+
+    assert fila["url_bases_reguladoras"] is None
+    assert fila["sede_electronica"] == "https://sede.example/tramite"
+
+
+@pytest.mark.parametrize(("mrr", "esperado"), [(True, True), (False, False), (None, None), ("si", None), (1, None)])
+def test_financiada_mrr_solo_sale_de_un_booleano_explicito(mrr: Any, esperado: bool | None) -> None:
+    detalle = detalle_real()
+    detalle["mrr"] = mrr
+
+    assert mapear_detalle(detalle)["financiada_mrr"] is esperado
+
+
+def test_financiada_mrr_ausente_es_none() -> None:
+    detalle = detalle_real()
+    del detalle["mrr"]
+
+    assert mapear_detalle(detalle)["financiada_mrr"] is None
+
+
+def test_el_orden_de_los_ids_resueltos_no_cambia_el_hash_y_se_guardan_ordenados() -> None:
+    uno = mapear_detalle(detalle_real(), organo_ids=[5, 1, 3], region_ids=(8, 2))
+    otro = mapear_detalle(detalle_real(), organo_ids=[3, 5, 1], region_ids=(2, 8))
+
+    assert uno["contenido_hash"] == otro["contenido_hash"]
+    assert uno["organo_ids"] == [1, 3, 5]
+    assert uno["region_ids"] == [2, 8]
+
+
+def test_una_fecha_con_basura_no_rompe_y_un_texto_permanente_sigue_valiendo() -> None:
+    detalle = detalle_real()
+    detalle["fechaFinSolicitud"] = "9999-99-99"
+    detalle["textFin"] = "Abierto de forma permanente"
+
+    fila = mapear_detalle(detalle)
+
+    assert fila["fecha_fin_solicitud"] is None
+    assert fila["plazo_permanente"] is True
