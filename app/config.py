@@ -96,6 +96,10 @@ class Settings(BaseSettings):
     sync_solape_dias: int = 2
     sync_presupuesto_refresco: int = 4000
     sync_max_minutos: int = 25
+    # Tope de retiradas suaves por run: max(mínimo, porcentaje de los detalles pedidos). Por encima, el run
+    # queda `partial` y no retira nada (una BDNS que responde 404 en masa es un fallo, no un borrado).
+    sync_max_retiradas_min: int = 50
+    sync_max_retiradas_pct: float = 0.05
     sync_backfill_meses: int = 24
 
     # Nivel de log de la aplicación. Sin esto, los INFO de app.* no se ven:

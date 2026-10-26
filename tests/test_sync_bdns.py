@@ -6,14 +6,19 @@ teardown in `conftest.py` removes them.
 """
 
 import copy
+import inspect
+import logging
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import httpx
+import pytest
 from sqlalchemy import select, text
 
+from app.config import settings
 from app.database import AsyncSessionLocal, engine
 from app.models import Convocatoria, SyncRun
+from app.services import sync_bdns
 from app.services.bdns_sync_cliente import ClienteBdnsSync
 from app.services.sync_bdns import ejecutar
 from tests.conftest import Sesion, codigo_bdns_de_prueba, crear_convocatoria_en_bd
@@ -34,6 +39,8 @@ class FalsaBdns:
         self.listados: list[dict[str, str]] = []
         self.detalles: list[str] = []
         self.corridas = 0
+        self.caidos: set[str] = set()  # detalles que responden 503
+        self.detalle_de: dict[str, dict[str, Any]] = {}  # respuesta forzada del detalle
 
     def nueva(self, codigo: str | None = None, *, fin: str = "2026-12-31", registro: date = AYER, **extra: Any) -> str:
         codigo = codigo or codigo_bdns_de_prueba()
@@ -61,7 +68,9 @@ class FalsaBdns:
         if ruta.endswith("/convocatorias"):
             self.detalles.append(params["numConv"])
             self.avance_minutos += self.avance_por_detalle
-            detalle = self.grants.get(params["numConv"])
+            if params["numConv"] in self.caidos:
+                return httpx.Response(503)
+            detalle = self.detalle_de.get(params["numConv"]) or self.grants.get(params["numConv"])
             return httpx.Response(200, json=detalle) if detalle else httpx.Response(404)
         return httpx.Response(200, json=[])
 
@@ -229,6 +238,7 @@ async def test_refresco_rotatorio_respeta_el_presupuesto(admin: Sesion) -> None:
     bdns.detalles.clear()
     run = await correr(bdns, admin, presupuesto_refresco=2)
     assert run is not None and run.estado == "partial" and len(bdns.detalles) == 2
+    assert run.error_detalle == sync_bdns.MOTIVO_PRESUPUESTO
     assert sorted(bdns.detalles) == sorted(codigos[:2])
     await correr(bdns, admin, presupuesto_refresco=2)
     await correr(bdns, admin, presupuesto_refresco=2)  # ceil(5 / 2) = 3 pasadas
@@ -320,3 +330,138 @@ async def test_backfill_por_trozos_mensuales_y_reanudacion(admin: Sesion) -> Non
     bdns2.listados.clear()
     await correr(bdns2, admin, modo="backfill", meses=3)
     assert [p["fechaDesde"] for p in bdns2.listados] == ["26/08/2026", "26/09/2026", "26/10/2026"]
+
+
+async def _ingerir_y_retirar(bdns: FalsaBdns, admin: Sesion, n: int) -> list[str]:
+    codigos = [bdns.nueva() for _ in range(n)]
+    await correr(bdns, admin)
+    for codigo in codigos:
+        bdns.grants.pop(codigo)
+    return codigos
+
+
+async def test_retiradas_por_encima_del_umbral_se_abortan(admin: Sesion, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "sync_max_retiradas_min", 2)
+    monkeypatch.setattr(settings, "sync_max_retiradas_pct", 0.0)
+    bdns = FalsaBdns()
+    codigos = await _ingerir_y_retirar(bdns, admin, 3)
+    run = await correr(bdns, admin)
+    assert run is not None and run.estado == "partial" and run.retiradas == 0
+    assert run.error_detalle and run.error_detalle.startswith(sync_bdns.MOTIVO_RETIRADAS)
+    assert all([(await fila(c)).removed_at is None for c in codigos])
+
+
+async def test_retiradas_en_el_umbral_exacto_se_aplican(admin: Sesion, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "sync_max_retiradas_min", 2)
+    monkeypatch.setattr(settings, "sync_max_retiradas_pct", 0.0)
+    bdns = FalsaBdns()
+    dos = await _ingerir_y_retirar(bdns, admin, 2)
+    run = await correr(bdns, admin)
+    assert run is not None and run.estado == "ok" and run.retiradas == 2
+    assert all([(await fila(c)).removed_at is not None for c in dos])
+
+
+async def test_con_la_bdns_no_disponible_no_se_retira_nada(admin: Sesion) -> None:
+    bdns = FalsaBdns()
+    retirada, caida = bdns.nueva(), bdns.nueva()
+    await correr(bdns, admin)
+    bdns.grants.pop(retirada)  # 404 genuino...
+    bdns.caidos.add(caida)  # ...pero la BDNS falla en otra petición del mismo run
+    run = await correr(bdns, admin)
+    assert run is not None and run.errores == 1 and run.retiradas == 0
+    assert (await fila(retirada)).removed_at is None
+    bdns.caidos.clear()
+    run2 = await correr(bdns, admin)  # recuperada: ahora sí
+    assert run2 is not None and run2.retiradas == 1
+    assert (await fila(retirada)).removed_at is not None
+
+
+def test_el_prefijo_es_obligatorio_para_ejecutar() -> None:
+    assert inspect.signature(ejecutar).parameters["prefijo"].default is inspect.Parameter.empty
+
+
+async def test_la_fase_a_respeta_el_prefijo(admin: Sesion) -> None:
+    bdns = FalsaBdns()
+    ajeno = bdns.nueva("XYZ" + codigo_bdns_de_prueba())
+    propio = bdns.nueva()
+    try:
+        run = await correr(bdns, admin)
+        assert run is not None and run.listadas == 2 and run.insertadas == 1
+        assert (await fila(propio)).codigo_bdns == propio
+        async with AsyncSessionLocal() as db:
+            n = await db.scalar(text("SELECT count(*) FROM convocatoria WHERE codigo_bdns = :c"), {"c": ajeno})
+        assert n == 0
+    finally:
+        async with AsyncSessionLocal() as db:
+            await db.execute(text("DELETE FROM convocatoria WHERE codigo_bdns = :c"), {"c": ajeno})
+            await db.commit()
+
+
+async def test_el_latido_se_manda_entre_paginas_y_si_falla_el_run_para(
+    admin: Sesion, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    llamadas: list[int] = []
+
+    async def latido(conexion: Any) -> None:
+        llamadas.append(1)
+
+    monkeypatch.setattr(sync_bdns, "_latido", latido)
+    bdns = FalsaBdns(tam_pagina=2)
+    for _ in range(6):
+        bdns.nueva()
+    run = await correr(bdns, admin)
+    assert run is not None and run.estado == "ok" and len(llamadas) >= 3
+
+    async def muerto(conexion: Any) -> None:
+        raise sync_bdns.LockPerdido("conexión del lock caída")
+
+    monkeypatch.setattr(sync_bdns, "_latido", muerto)
+    bdns2 = FalsaBdns(tam_pagina=2)
+    for _ in range(4):
+        bdns2.nueva()
+    run2 = await correr(bdns2, admin)
+    assert run2 is not None and run2.estado == "failed" and "lock" in (run2.error_detalle or "")
+    assert bdns2.detalles == []
+
+
+async def test_un_fallo_al_liberar_el_lock_se_registra_y_no_se_propaga(caplog: pytest.LogCaptureFixture) -> None:
+    class Rota:
+        async def execute(self, *_: Any) -> None:
+            raise RuntimeError("conexión cerrada")
+
+    with caplog.at_level(logging.WARNING, logger="app.services.sync_bdns"):
+        await sync_bdns._liberar_lock(Rota())  # type: ignore[arg-type]
+    assert "advisory_unlock" in caplog.text
+
+
+async def test_detalle_invalido_no_se_reintenta_en_cada_run(admin: Sesion) -> None:
+    bdns = FalsaBdns()
+    codigo = bdns.nueva(registro=HOY - timedelta(days=200))
+    bdns.detalle_de[codigo] = {**copy.deepcopy(bdns.grants[codigo]), "codigoBDNS": "TST-OTRO"}
+    run = await correr(bdns, admin, desde=HOY - timedelta(days=300))
+    assert run is not None and run.errores == 1 and codigo in (run.error_detalle or "")
+    assert (await fila(codigo)).detalle_sync_at is not None
+    bdns.detalles.clear()
+    await correr(bdns, admin)
+    assert bdns.detalles == []
+
+
+async def test_un_fallo_de_la_base_en_las_fases_no_lo_tapa_el_rollback_pendiente(
+    admin: Sesion, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def rompe(ctx: Any, resolvedor: Any) -> bool:
+        ctx.db.add(SyncRun(modo="invalido", created_by=admin.id, updated_by=admin.id))
+        await ctx.db.flush()
+        return True
+
+    monkeypatch.setattr(sync_bdns, "_fase_b", rompe)
+    bdns = FalsaBdns()
+    bdns.nueva()
+    with pytest.raises(Exception) as excepcion:
+        await correr(bdns, admin)
+    assert type(excepcion.value).__name__ != "PendingRollbackError"
+    assert "ck_sync_run_modo" in str(excepcion.value)
+    async with AsyncSessionLocal() as db:
+        consulta = select(SyncRun).where(SyncRun.created_by == admin.id).order_by(SyncRun.id.desc())
+        ultimo = (await db.scalars(consulta)).first()
+    assert ultimo is not None and ultimo.estado == "failed"

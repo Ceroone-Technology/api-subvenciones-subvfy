@@ -12,7 +12,8 @@ from app.config import settings
 from app.core.scheduler import JOB_MOTOR_ALERTAS, JOB_SYNC_BDNS, iniciar_scheduler, parar_scheduler
 from app.database import AsyncSessionLocal
 from app.models import SyncRun
-from app.services.sync_bdns import ResultadoSync
+from app.services.sync_bdns import MOTIVO_PRESUPUESTO, ResultadoSync
+from tests.conftest import Sesion
 
 
 @pytest.mark.parametrize(
@@ -80,3 +81,24 @@ async def test_sano_con_ok_reciente_y_no_sano_pasadas_12_horas(
     assert {"modo", "estado", "insertadas", "peticiones_bdns"} <= set(cuerpo["ejecuciones"][0])
     monkeypatch.setattr(admin_sync, "ahora", lambda: datetime.now(UTC) + timedelta(hours=13))
     assert (await client_admin.get("/admin/sync/estado")).json()["sano"] is False
+
+
+async def _parcial(admin: Sesion, motivo: str) -> None:
+    async with AsyncSessionLocal() as db:
+        db.add(
+            SyncRun(
+                modo="incremental", estado="partial", finished_at=datetime.now(UTC), error_detalle=motivo,
+                created_by=admin.id, updated_by=admin.id,
+            )
+        )  # fmt: skip
+        await db.commit()
+
+
+async def test_parcial_solo_por_presupuesto_cuenta_como_sano(admin: Sesion, client_admin: AsyncClient) -> None:
+    await _parcial(admin, "Caja de tiempo agotada.")
+    assert (await client_admin.get("/admin/sync/estado")).json()["sano"] is False
+    await _parcial(admin, "Retiradas masivas abortadas (3 > 2).")
+    assert (await client_admin.get("/admin/sync/estado")).json()["sano"] is False
+    await _parcial(admin, MOTIVO_PRESUPUESTO)
+    cuerpo = (await client_admin.get("/admin/sync/estado")).json()
+    assert cuerpo["sano"] is True and cuerpo["ultimo_ok_at"] is not None

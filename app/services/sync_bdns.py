@@ -13,6 +13,8 @@ el cron, el CLI y, en el Hito 7, una Lambda.
 - **Fase C** (solo incremental): refresco rotatorio de las convocatorias abiertas, pendientes
   o recientes sin plazo, las de `detalle_sync_at` más viejo primero, con presupuesto.
 - Upsert idempotente por `contenido_hash`; la fila nunca se borra (`removed_at`).
+- Retirada suave **al final del run** y con tope: se aplaza si la BDNS falló en algún detalle y se aborta
+  (run `partial`) si lo retirado supera `max(sync_max_retiradas_min, sync_max_retiradas_pct * detalles)`.
 
 Todas las marcas de tiempo salen de `ahora()` para poder probarlo con un reloj falso.
 """
@@ -26,7 +28,7 @@ from typing import Any
 
 from sqlalchemy import Boolean, and_, func, literal, literal_column, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.config import settings
 from app.database import engine
@@ -47,6 +49,17 @@ DIAS_SIN_PLAZO_RECIENTE = 90
 REFRESCO_CATALOGOS = timedelta(hours=24)
 # Campos del detalle que, si el detalle no los trae, conservan lo ya guardado (COALESCE).
 CONSERVAR = ("nivel_administracion", "administracion", "organo_convocante", "fecha_registro", "bdns_id")
+# Valor de `prefijo` en producción: todos los códigos. Es explícito para que ningún test lo herede por defecto.
+TODOS = ""
+# Motivos de un run `partial`. El de presupuesto es esperado (el siguiente run continúa) y /admin/sync/estado
+# lo da por sano; cualquier otro `partial` (caja de tiempo, retiradas masivas) no.
+MOTIVO_PRESUPUESTO = "Presupuesto de refresco agotado."
+MOTIVO_RETIRADAS = "Retiradas masivas abortadas"
+MAX_INVALIDAS_EN_DETALLE = 5
+
+
+class LockPerdido(Exception):
+    """La conexión que sostiene el advisory lock murió: el run ya no es exclusivo y debe parar."""
 
 
 @dataclass(frozen=True)
@@ -71,12 +84,15 @@ async def ejecutar_sync(
         umbral_breaker=settings.bdns_sync_breaker,
         vpd=settings.bdns_vpd,
     ) as cliente:
-        return await ejecutar(cliente, modo=modo, meses=meses, max_minutos=max_minutos)
+        return await ejecutar(cliente, prefijo=TODOS, modo=modo, meses=meses, max_minutos=max_minutos)
 
 
 async def ejecutar(
     cliente: ClienteBdnsSync,
     *,
+    # Solo procesa los códigos con este prefijo (los tests aíslan así sus filas de las reales).
+    # Sin valor por defecto a propósito: producción pasa `TODOS` y un test que lo olvide no compila.
+    prefijo: str,
     modo: str = "incremental",
     meses: int | None = None,
     max_minutos: int | None = None,
@@ -85,8 +101,6 @@ async def ejecutar(
     ahora: Callable[[], datetime] = lambda: datetime.now(UTC),
     hoy: date | None = None,
     desde: date | None = None,
-    # Solo procesa los códigos con este prefijo (los tests aíslan así sus filas de las reales).
-    prefijo: str = "",
     motor: AsyncEngine = engine,
 ) -> ResultadoSync | None:
     """Un run completo. Devuelve `None` si otro run tiene el lock (sin tocar la BDNS)."""
@@ -98,10 +112,25 @@ async def ejecutar(
         try:
             return await _con_lock(
                 cliente, async_sessionmaker(motor, expire_on_commit=False), modo, meses, max_minutos,
-                presupuesto_refresco, usuario_id, ahora, hoy, desde, prefijo,
+                presupuesto_refresco, usuario_id, ahora, hoy, desde, prefijo, conexion,
             )  # fmt: skip
         finally:
-            await conexion.execute(text(f"SELECT pg_advisory_unlock({CLAVE_LOCK})"))
+            await _liberar_lock(conexion)
+
+
+async def _liberar_lock(conexion: AsyncConnection) -> None:
+    """Un fallo aquí no debe tapar el resultado (ni el error) del run: al cerrar la conexión el lock cae igual."""
+    try:
+        await conexion.execute(text(f"SELECT pg_advisory_unlock({CLAVE_LOCK})"))
+    except Exception:
+        logger.warning("Sync BDNS: falló pg_advisory_unlock; el lock cae al cerrar la conexión.", exc_info=True)
+
+
+async def _latido(conexion: AsyncConnection) -> None:
+    try:
+        await conexion.execute(text("SELECT 1"))
+    except Exception as exc:
+        raise LockPerdido(f"Conexión del lock perdida ({type(exc).__name__}): el run se detiene.") from exc
 
 
 async def _con_lock(
@@ -116,6 +145,7 @@ async def _con_lock(
     hoy: date | None,
     desde: date | None,
     prefijo: str,
+    conexion: AsyncConnection,
 ) -> ResultadoSync:
     inicio = ahora()
     limite = inicio + timedelta(minutes=settings.sync_max_minutos if max_minutos is None else max_minutos)
@@ -133,21 +163,32 @@ async def _con_lock(
         await _planificar(db, run, uid, hoy, meses or settings.sync_backfill_meses, desde)
         db.add(run)
         await db.commit()
-        ctx = _Ctx(db, run, cliente, uid, ahora, limite, prefijo)
+        run_id = run.id  # tras un rollback `run` queda expirado: el id se guarda antes
+        ctx = _Ctx(db, run, cliente, uid, ahora, limite, prefijo, conexion)
         error: str | None = None
         try:
             await _fases(ctx, hoy, presupuesto)
             estado = "partial" if ctx.parcial else "ok"
-        except CircuitoAbierto as exc:
+        except (CircuitoAbierto, LockPerdido) as exc:
             estado, error = "failed", str(exc)
         except Exception as exc:
             await db.rollback()
-            await _cerrar_fallida(sesiones, run.id, f"{type(exc).__name__}: {exc}")
+            await _cerrar_fallida(sesiones, run_id, f"{type(exc).__name__}: {exc}")
             raise
-        run.estado, run.finished_at, run.error_detalle = estado, ahora(), (error or ctx.motivo)
+        run.estado, run.finished_at = estado, ahora()
+        run.error_detalle = _detalle_error(error or ctx.motivo, ctx.invalidas)
         run.peticiones_bdns = cliente.peticiones
         await db.commit()
-        return ResultadoSync(run.id, estado)
+        return ResultadoSync(run_id, estado)
+
+
+def _detalle_error(base: str | None, invalidas: list[str]) -> str | None:
+    if not invalidas:
+        return base
+    resto = len(invalidas) - MAX_INVALIDAS_EN_DETALLE
+    lista = ", ".join(invalidas[:MAX_INVALIDAS_EN_DETALLE])
+    nota = f"Detalle inválido: {lista}" + (f" (+{resto})" if resto > 0 else "")
+    return f"{base} {nota}"[:500] if base else nota[:500]
 
 
 async def _cerrar_fallida(sesiones: async_sessionmaker[AsyncSession], run_id: int, mensaje: str) -> None:
@@ -194,11 +235,18 @@ class _Ctx:
         ahora: Callable[[], datetime],
         limite: datetime,
         prefijo: str,
+        conexion: AsyncConnection,
     ) -> None:
         self.db, self.run, self.cliente, self.uid, self.ahora, self.limite = db, run, cliente, uid, ahora, limite
-        self.prefijo = prefijo
+        self.prefijo, self.conexion = prefijo, conexion
         self.parcial = False
         self.motivo: str | None = None
+        self.por_retirar: list[str] = []  # 404 de la BDNS; se aplican al final, con tope
+        self.indisponibles = 0  # detalles que fallaron por BdnsNoDisponible en este run
+        self.invalidas: list[str] = []
+
+    async def latir(self) -> None:
+        await _latido(self.conexion)
 
     def agotado(self) -> bool:
         if self.ahora() < self.limite:
@@ -218,15 +266,58 @@ async def _fases(ctx: _Ctx, hoy: date, presupuesto: int) -> None:
             logger.warning("Sync BDNS: no se pudieron refrescar los catálogos.")
     resolvedor = await cargar_resolvedor(db)
     try:
-        if "pagina" in (run.cursor or {}) and not await _fase_a(ctx):
-            return
-        if not await _fase_b(ctx, resolvedor):
-            return
-        if run.modo == "incremental":
-            await _fase_c(ctx, resolvedor, hoy, presupuesto)
-    finally:
-        run.organos_sin_resolver = resolvedor.organos_sin_resolver
-        await db.commit()
+        await _correr_fases(ctx, resolvedor, hoy, presupuesto)
+        await _retirar(ctx)
+    except BaseException:
+        await _persistir_conteo(ctx, resolvedor, silencioso=True)
+        raise
+    await _persistir_conteo(ctx, resolvedor, silencioso=False)
+
+
+async def _correr_fases(ctx: _Ctx, resolvedor: ResolvedorCatalogo, hoy: date, presupuesto: int) -> None:
+    if "pagina" in (ctx.run.cursor or {}) and not await _fase_a(ctx):
+        return
+    if not await _fase_b(ctx, resolvedor):
+        return
+    if ctx.run.modo == "incremental":
+        await _fase_c(ctx, resolvedor, hoy, presupuesto)
+
+
+async def _persistir_conteo(ctx: _Ctx, resolvedor: ResolvedorCatalogo, *, silencioso: bool) -> None:
+    """Cierra las fases. Con la sesión rota (`PendingRollbackError`) hace rollback antes del commit, y si ya hay
+    un error en vuelo nunca lo tapa con uno nuevo."""
+    try:
+        if not ctx.db.is_active:
+            await ctx.db.rollback()
+        ctx.run.organos_sin_resolver = resolvedor.organos_sin_resolver
+        await ctx.db.commit()
+    except Exception:
+        if not silencioso:
+            raise
+        logger.exception("Sync BDNS: no se pudo guardar el conteo al cerrar las fases.")
+
+
+async def _retirar(ctx: _Ctx) -> None:
+    """Retirada suave de lo que la BDNS dio por inexistente, con dos salvaguardas: nada si la BDNS falló en este
+    run (un 404 junto a 5xx no es fiable) y nada por encima del tope (un fallo de la BDNS, no un borrado real)."""
+    pendientes, run = ctx.por_retirar, ctx.run
+    if not pendientes:
+        return
+    if ctx.indisponibles:
+        logger.warning("Sync BDNS: %d retiradas aplazadas, la BDNS falló en el run.", len(pendientes))
+        return
+    tope = max(settings.sync_max_retiradas_min, int(settings.sync_max_retiradas_pct * run.detalles))
+    if len(pendientes) > tope:
+        ctx.parcial = True
+        ctx.motivo = f"{MOTIVO_RETIRADAS} ({len(pendientes)} > {tope}): revisar la BDNS antes de reintentar."
+        return
+    ahora, c = ctx.ahora(), Convocatoria
+    await ctx.db.execute(
+        update(c)
+        .where(c.codigo_bdns.in_(pendientes), c.removed_at.is_(None))
+        .values(removed_at=ahora, detalle_sync_at=ahora, updated_by=ctx.uid, updated_at=ahora)
+    )
+    run.retiradas += len(pendientes)
 
 
 def _fin_trozo(trozo: date, modo: str, hasta: date) -> date:
@@ -244,8 +335,9 @@ async def _fase_a(ctx: _Ctx) -> bool:
         while hay_mas:
             if ctx.agotado():
                 return False
+            await ctx.latir()
             resultado = await ctx.cliente.listar_pagina(trozo, fin, pagina=pagina)
-            run.insertadas += await _guardar_resumen(db, resultado.convocatorias, ctx.uid, ctx.ahora())
+            run.insertadas += await _guardar_resumen(db, resultado.convocatorias, ctx.uid, ctx.ahora(), ctx.prefijo)
             run.listadas += len(resultado.convocatorias)
             hay_mas = bool(resultado.convocatorias) and not resultado.ultima
             pagina = pagina + 1 if hay_mas else 0
@@ -258,9 +350,11 @@ async def _fase_a(ctx: _Ctx) -> bool:
     return True
 
 
-async def _guardar_resumen(db: AsyncSession, filas: list[ConvocatoriaBdns], uid: int, ahora: datetime) -> int:
+async def _guardar_resumen(
+    db: AsyncSession, filas: list[ConvocatoriaBdns], uid: int, ahora: datetime, prefijo: str
+) -> int:
     """Upsert del resumen del listado; devuelve las filas nuevas. Orden fijo por código (sin deadlocks)."""
-    unicas = {f.codigo_bdns: f for f in filas if f.codigo_bdns}
+    unicas = {f.codigo_bdns: f for f in filas if f.codigo_bdns and f.codigo_bdns.startswith(prefijo)}
     if not unicas:
         return 0
     valores = [
@@ -308,6 +402,7 @@ async def _fase_b(ctx: _Ctx, resolvedor: ResolvedorCatalogo) -> bool:
             await _refrescar(ctx, resolvedor, codigo)
             if i % COMMIT_CADA == COMMIT_CADA - 1:
                 await ctx.db.commit()
+                await ctx.latir()
         await ctx.db.commit()
         ultimo_id = lote[-1][0]
 
@@ -334,7 +429,7 @@ async def _fase_c(ctx: _Ctx, resolvedor: ResolvedorCatalogo, hoy: date, presupue
         )
     ).all()
     if len(codigos) > presupuesto:
-        ctx.parcial, ctx.motivo = True, "Presupuesto de refresco agotado."
+        ctx.parcial, ctx.motivo = True, MOTIVO_PRESUPUESTO
         codigos = codigos[:presupuesto]
     for i, codigo in enumerate(codigos):
         if ctx.agotado():
@@ -342,6 +437,7 @@ async def _fase_c(ctx: _Ctx, resolvedor: ResolvedorCatalogo, hoy: date, presupue
         await _refrescar(ctx, resolvedor, codigo)
         if i % COMMIT_CADA == COMMIT_CADA - 1:
             await ctx.db.commit()
+            await ctx.latir()
 
 
 async def _refrescar(ctx: _Ctx, resolvedor: ResolvedorCatalogo, codigo: str) -> None:
@@ -351,17 +447,13 @@ async def _refrescar(ctx: _Ctx, resolvedor: ResolvedorCatalogo, codigo: str) -> 
         detalle = await ctx.cliente.detalle(codigo)
     except BdnsNoDisponible:
         run.errores += 1
+        ctx.indisponibles += 1
         return
     ahora = ctx.ahora()
     run.detalles += 1
     c = Convocatoria
     if detalle is None:
-        await db.execute(
-            update(c)
-            .where(c.codigo_bdns == codigo, c.removed_at.is_(None))
-            .values(removed_at=ahora, detalle_sync_at=ahora, updated_by=uid, updated_at=ahora)
-        )
-        run.retiradas += 1
+        ctx.por_retirar.append(codigo)
         return
     try:
         fila = mapear_detalle(
@@ -370,10 +462,10 @@ async def _refrescar(ctx: _Ctx, resolvedor: ResolvedorCatalogo, codigo: str) -> 
             region_ids=resolvedor.resolver_regiones(etiquetas_region(detalle)),
         )
     except DetalleInvalido:
-        run.errores += 1
+        await _marcar_invalido(ctx, codigo)
         return
     if fila["codigo_bdns"] != codigo:
-        run.errores += 1
+        await _marcar_invalido(ctx, codigo)
         return
     previo = await db.scalar(select(c.contenido_hash).where(c.codigo_bdns == codigo))
     if previo == fila["contenido_hash"]:
@@ -384,6 +476,17 @@ async def _refrescar(ctx: _Ctx, resolvedor: ResolvedorCatalogo, codigo: str) -> 
     await _upsert_detalle(db, fila, ahora, uid)
     if previo is not None:
         run.actualizadas += 1
+
+
+async def _marcar_invalido(ctx: _Ctx, codigo: str) -> None:
+    """Detalle inservible: se anota el error y se marca la fila como revisada
+    (si no, la fase B la reintentaría en cada run)."""
+    ahora, c = ctx.ahora(), Convocatoria
+    ctx.run.errores += 1
+    ctx.invalidas.append(codigo)
+    await ctx.db.execute(
+        update(c).where(c.codigo_bdns == codigo).values(detalle_sync_at=ahora, updated_by=ctx.uid, updated_at=ahora)
+    )
 
 
 async def _upsert_detalle(db: AsyncSession, fila: dict[str, Any], ahora: datetime, uid: int) -> None:
