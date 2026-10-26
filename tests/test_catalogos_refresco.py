@@ -130,3 +130,31 @@ async def test_el_resolvedor_se_carga_de_la_base_de_datos(admin: Sesion) -> None
     assert resolvedor.resolver_organo(RutaOrgano("ESTADO", "test-ministerio x", "TEST-DG DOS")) == [BASE + 1, BASE + 3]
     assert resolvedor.resolver_organo(RutaOrgano("ESTADO", "TEST-MINISTERIO X", "TEST-NO EXISTE")) == [BASE + 1]
     assert resolvedor.organos_sin_resolver == 1
+
+
+async def test_el_upsert_ordena_las_filas_para_no_provocar_deadlocks(
+    admin: Sesion, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services import catalogos
+
+    vistos: list[list[int]] = []
+    original = catalogos.insert_postgresql
+
+    def espia(modelo: Any) -> Any:
+        constructor = original(modelo)
+        valores = constructor.values
+
+        def values(filas: Any) -> Any:
+            vistos.append([f["bdns_id"] for f in filas])
+            return valores(filas)
+
+        constructor.values = values  # type: ignore[method-assign]
+        return constructor
+
+    monkeypatch.setattr(catalogos, "insert_postgresql", espia)
+    bdns = FalsaBdns()
+    bdns.regiones = [nodo(30, "ES30 - C"), nodo(10, "ES10 - A"), nodo(20, "ES20 - B")]
+    async with cliente_de(bdns) as cliente, AsyncSessionLocal() as db:
+        await refrescar_catalogos(db, cliente, usuario_id=admin.id)
+    regiones = [lote for lote in vistos if BASE + 10 in lote][0]
+    assert regiones == sorted(regiones)

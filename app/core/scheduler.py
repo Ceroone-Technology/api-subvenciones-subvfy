@@ -25,15 +25,18 @@ import logging
 from datetime import UTC, datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 from app.config import settings
 from app.database import AsyncSessionLocal
 from app.services.motor_alertas import procesar_alertas_pendientes
 from app.services.sistema import id_usuario_sistema
+from app.services.sync_bdns import ejecutar_sync
 
 logger = logging.getLogger(__name__)
 
 JOB_MOTOR_ALERTAS = "motor-alertas"
+JOB_SYNC_BDNS = "sync-bdns"
 
 
 async def ciclo_motor_alertas() -> None:
@@ -48,17 +51,42 @@ async def ciclo_motor_alertas() -> None:
         logger.exception("Motor de alertas: el ciclo no pudo completarse.")
 
 
+async def ciclo_sync_bdns() -> None:
+    """Un run incremental de la sincronización BDNS; nunca deja escapar una excepción."""
+    try:
+        await ejecutar_sync()
+    except Exception:
+        logger.exception("Sync BDNS: el run no pudo completarse.")
+
+
 def iniciar_scheduler() -> AsyncIOScheduler | None:
     """Arranca el scheduler si está habilitado; si no, devuelve None.
 
     Desactivado por defecto: en tests y en la Lambda del Hito 7 no debe
     arrancar nada por su cuenta.
     """
-    if not settings.scheduler_habilitado:
-        logger.info("Scheduler desactivado (SCHEDULER_HABILITADO=false): el motor de alertas no se dispara.")
+    if not (settings.scheduler_habilitado or settings.sync_habilitado):
+        logger.info("Scheduler desactivado (SCHEDULER_HABILITADO y SYNC_HABILITADO en false): no se dispara nada.")
         return None
 
     scheduler = AsyncIOScheduler(timezone="UTC")
+    # Cada job depende solo de su flag: uno activo no arrastra al otro.
+    if settings.sync_habilitado:
+        scheduler.add_job(
+            ciclo_sync_bdns,
+            CronTrigger(hour=settings.sync_horas, minute=0, timezone=settings.sync_zona),
+            id=JOB_SYNC_BDNS,
+            max_instances=1,
+            coalesce=True,
+        )
+        logger.info("Sync BDNS programada a las %s (%s).", settings.sync_horas, settings.sync_zona)
+    if settings.scheduler_habilitado:
+        _programar_alertas(scheduler)
+    scheduler.start()
+    return scheduler
+
+
+def _programar_alertas(scheduler: AsyncIOScheduler) -> None:
     scheduler.add_job(
         ciclo_motor_alertas,
         "interval",
@@ -73,11 +101,9 @@ def iniciar_scheduler() -> AsyncIOScheduler | None:
         # trabajo, porque quien decide es ultima_ejecucion_at.
         next_run_time=datetime.now(UTC),
     )
-    scheduler.start()
     logger.info(
         "Scheduler arrancado: motor de alertas cada %d minuto(s).", settings.scheduler_intervalo_minutos
     )
-    return scheduler
 
 
 async def parar_scheduler(scheduler: AsyncIOScheduler | None) -> None:

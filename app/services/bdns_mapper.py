@@ -56,8 +56,8 @@ _ESQUEMAS_URL = ("http", "https")
 # mayúsculas.
 _PATRON_PERMANENTE = re.compile(r"permanente|indefinid|siempre abiert|todo el ano")
 # "no permanente", "no es permanente", "no abierta de forma indefinida": un "no" a
-# lo sumo dos palabras antes de la expresión la niega.
-_NEGACION_PREVIA = re.compile(r"\bno\b(?:\W+\w+){0,2}\W*$")
+# lo sumo dos palabras antes de la expresión la niega, sin cruzar `, . ;`.
+_NEGACION_PREVIA = re.compile(r"\bno\b(?:[^\w,.;]+\w+){0,2}[^\w,.;]*$")
 
 
 class DetalleInvalido(ValueError):

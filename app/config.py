@@ -84,6 +84,20 @@ class Settings(BaseSettings):
     # entera o nada.
     bdns_dias_primera_ejecucion: int = 7
 
+    # Sincronización local de la BDNS (`bdns-local-sync`). Desactivada por
+    # defecto, como el scheduler de alertas; el CLI no depende de este flag.
+    sync_habilitado: bool = False
+    sync_horas: str = "7,13,19"
+    sync_zona: str = "Europe/Madrid"
+    bdns_vpd: str = "GE"
+    bdns_sync_rps: float = 3.0
+    bdns_sync_reintentos: int = 4
+    bdns_sync_breaker: int = 5
+    sync_solape_dias: int = 2
+    sync_presupuesto_refresco: int = 4000
+    sync_max_minutos: int = 25
+    sync_backfill_meses: int = 24
+
     # Nivel de log de la aplicación. Sin esto, los INFO de app.* no se ven:
     # uvicorn solo configura sus propios loggers.
     log_level: str = "INFO"

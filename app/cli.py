@@ -25,6 +25,7 @@ from sqlalchemy import select
 from app.core.security import PASSWORD_MAX_BYTES, PASSWORD_MIN_LONGITUD, hashear_password
 from app.database import AsyncSessionLocal
 from app.models import Empresa, Rol, Usuario
+from app.services.sync_bdns import ejecutar_sync
 
 
 async def crear_admin(
@@ -82,6 +83,20 @@ def _pedir_password() -> str:
     return password
 
 
+def _sync_bdns(args: argparse.Namespace) -> None:
+    resultado = asyncio.run(
+        ejecutar_sync(
+            modo="backfill" if args.backfill else "incremental", meses=args.meses, max_minutos=args.max_minutos
+        )
+    )
+    if resultado is None:
+        print("Sync BDNS: locked, ya hay otro run en curso.")
+        return
+    print(f"Sync BDNS: run {resultado.run_id} terminó en estado {resultado.estado}.")
+    if resultado.estado == "failed":
+        raise SystemExit(1)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m app.cli", description=__doc__)
     subcomandos = parser.add_subparsers(dest="comando", required=True)
@@ -97,7 +112,15 @@ def main(argv: list[str] | None = None) -> None:
         help="Si se omite, se pide por consola (recomendado: no queda en el historial del shell).",
     )
 
+    sync = subcomandos.add_parser("sync-bdns", help="Sincroniza la BDNS con la base local.")
+    sync.add_argument("--backfill", action="store_true", help="Carga histórica (reanudable).")
+    sync.add_argument("--meses", type=int, help="Meses hacia atrás del backfill (por defecto SYNC_BACKFILL_MESES).")
+    sync.add_argument("--max-minutos", type=int, help="Caja de tiempo del run (por defecto SYNC_MAX_MINUTOS).")
+
     args = parser.parse_args(argv)
+    if args.comando == "sync-bdns":
+        _sync_bdns(args)
+        return
     password = args.password or _pedir_password()
     if len(password) < PASSWORD_MIN_LONGITUD:
         raise SystemExit(f"La contraseña debe tener al menos {PASSWORD_MIN_LONGITUD} caracteres.")

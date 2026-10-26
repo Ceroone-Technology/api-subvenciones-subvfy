@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import alertas, auth, empresas, favoritos, roles, usuarios
+from app.api.routes import admin_sync, alertas, auth, empresas, favoritos, roles, usuarios
 from app.config import settings
 from app.core.scheduler import iniciar_scheduler, parar_scheduler
 
@@ -56,6 +56,7 @@ app.include_router(empresas.router)
 app.include_router(usuarios.router)
 app.include_router(favoritos.router)
 app.include_router(alertas.router)
+app.include_router(admin_sync.router)
 
 # Los routers de negocio restantes (análisis IA)
 # se registran aquí a medida que se construyen, uno por Funcionalidad del

@@ -334,3 +334,20 @@ def test_una_fecha_con_basura_no_rompe_y_un_texto_permanente_sigue_valiendo() ->
 
     assert fila["fecha_fin_solicitud"] is None
     assert fila["plazo_permanente"] is True
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "Plazo no previsto. Permanente",
+        "No, permanente",
+        "sin cambios; no; siempre abierta",
+        "No hay más. Es indefinido",
+    ],
+)
+def test_la_negacion_no_cruza_signos_de_puntuacion(texto: str) -> None:
+    assert es_plazo_permanente(texto, None, None) is True
+
+
+def test_la_negacion_sigue_valiendo_sin_puntuacion_de_por_medio() -> None:
+    assert es_plazo_permanente("no es permanente", None, None) is False

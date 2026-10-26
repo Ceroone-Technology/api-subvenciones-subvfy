@@ -40,6 +40,8 @@ _PATRON_CODIGO = re.compile(r"^\s*([A-Z0-9]+)\s+-\s+")
 # Un INSERT con 10 columnas por fila queda muy por debajo del límite de 32 767 parámetros.
 FILAS_POR_LOTE = 1000
 DESCRIPCION_MAX = 500
+CODIGO_MAX = 20  # catalogo_bdns.codigo varchar(20)
+ID_MIN, ID_MAX = -(2**31), 2**31 - 1  # catalogo_bdns.bdns_id es int32
 
 
 @dataclass(frozen=True)
@@ -79,7 +81,12 @@ def aplanar_arbol(
     def recorrer(nodo: dict[str, Any], ruta_ids: tuple[int, ...], ruta_texto: tuple[str, ...]) -> None:
         identificador = nodo.get("id")
         descripcion = str(nodo.get("descripcion") or "").strip()
-        if isinstance(identificador, bool) or not isinstance(identificador, int) or not descripcion:
+        if (
+            isinstance(identificador, bool)
+            or not isinstance(identificador, int)
+            or not ID_MIN <= identificador <= ID_MAX
+            or not descripcion
+        ):
             return
         ruta_ids = (*ruta_ids, identificador)
         ruta_texto = (*ruta_texto, normalizar_texto(descripcion))
@@ -90,7 +97,7 @@ def aplanar_arbol(
                 bdns_id=identificador,
                 padre_bdns_id=ruta_ids[-2] if len(ruta_ids) > 1 else None,
                 descripcion=descripcion[:DESCRIPCION_MAX],
-                codigo=coincidencia.group(1) if coincidencia else None,
+                codigo=coincidencia.group(1) if coincidencia and len(coincidencia.group(1)) <= CODIGO_MAX else None,
                 nivel_administracion=nivel_administracion,
                 ruta_ids=ruta_ids,
                 ruta_norm=SEPARADOR_RUTA.join(ruta_texto),
@@ -201,6 +208,7 @@ async def cargar_resolvedor(db: AsyncSession) -> ResolvedorCatalogo:
 
 async def _upsert(db: AsyncSession, nodos: list[NodoCatalogo], usuario_id: int) -> None:
     # Un mismo id repetido dentro de un INSERT haría fallar el ON CONFLICT: gana el último.
+    # Orden fijo: dos runs con las mismas filas en otro orden podrían bloquearse entre sí.
     unicos = {(n.tipo, n.bdns_id): n for n in nodos}
     filas = [
         {
@@ -215,7 +223,7 @@ async def _upsert(db: AsyncSession, nodos: list[NodoCatalogo], usuario_id: int) 
             "created_by": usuario_id,
             "updated_by": usuario_id,
         }
-        for n in unicos.values()
+        for _, n in sorted(unicos.items())
     ]
     for inicio in range(0, len(filas), FILAS_POR_LOTE):
         insercion = insert_postgresql(CatalogoBdns).values(filas[inicio : inicio + FILAS_POR_LOTE])

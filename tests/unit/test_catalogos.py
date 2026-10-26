@@ -186,3 +186,14 @@ def test_una_ruta_ambigua_no_se_adivina() -> None:
 
     assert resolvedor.resolver_organo(RutaOrgano("AUTONOMICA", "Asturias", "Salud")) == []
     assert resolvedor.organos_sin_resolver == 1
+
+
+def test_aplanar_descarta_ids_fuera_de_int32_y_deja_sin_codigo_los_demasiado_largos() -> None:
+    arbol = [
+        nodo(2**31, "ES99 - FUERA DE RANGO"),
+        nodo(7, "ABCDEFGHIJKLMNOPQRSTU - DEMASIADO LARGO"),
+        nodo(8, "ES12 - NORMAL"),
+    ]
+    por_id = {n.bdns_id: n for n in aplanar_arbol(arbol, tipo="region")}
+    assert set(por_id) == {7, 8}
+    assert por_id[7].codigo is None and por_id[8].codigo == "ES12"
