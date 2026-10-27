@@ -13,8 +13,9 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from app.models.empresa import ESTADOS_EMPRESA, TAMANOS_VALIDOS
 
-TamanoEmpresa = Literal[TAMANOS_VALIDOS]
-EstadoEmpresa = Literal[ESTADOS_EMPRESA]
+# Literal[tupla] funciona en runtime pero mypy no lo acepta (ver CLAUDE.md): de ahí los ignore.
+TamanoEmpresa = Literal[TAMANOS_VALIDOS]  # type: ignore[valid-type]
+EstadoEmpresa = Literal[ESTADOS_EMPRESA]  # type: ignore[valid-type]
 
 
 def _normalizar_nif(valor: str) -> str:

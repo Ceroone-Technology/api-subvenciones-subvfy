@@ -2,12 +2,23 @@
 
 Permisos (ver `app.core.permisos` para el modelo completo):
 
-| Acción              | admin | gestor        | usuario       |
-|---------------------|-------|---------------|---------------|
-| Listar / consultar  | todas | solo la suya  | solo la suya  |
-| Crear               | sí    | no            | no            |
-| Editar              | sí    | solo la suya  | no            |
-| Dar de baja         | sí    | no            | no            |
+| Acción              | admin        | gestor                  | usuario      |
+|---------------------|--------------|-------------------------|--------------|
+| Listar / consultar  | todas        | solo la suya            | solo la suya |
+| Crear               | sí           | no                      | no           |
+| Editar              | sí           | la suya, sin `estado`   | no           |
+| Dar de baja         | menos la suya| no                      | no           |
+
+Desde que **la baja de una empresa corta el acceso de toda su gente**
+(AUD-009), su `estado` no es un campo cualquiera y tiene dos reglas:
+
+- **Solo un admin lo cambia**, por presencia del campo: un gestor que lo
+  envíe recibe 403 aunque sea para reactivar. Si pudiera, dejaría fuera a su
+  empresa entera, él incluido.
+- **Nadie da de baja la empresa en la que vive**, ni por `PATCH` ni por
+  `DELETE`: se quedaría fuera en la petición siguiente y la única salida
+  sería otro admin o el CLI. Lo que se rechaza es el valor que deja fuera,
+  así que mandar `activa` sobre su propia empresa sí funciona.
 
 Nota sobre el borrado: `DELETE /empresas/{id}` es una baja lógica
 (`estado = "inactiva"`), no un DELETE físico. Una empresa es referenciada
@@ -20,6 +31,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, or_, select
 
 from app.api.deps import AdminDep, DbDep, GestorDep, PaginacionDep, UsuarioActualDep
+from app.core.permisos import ESTADO_EMPRESA_ACTIVA
 from app.models import Empresa
 from app.schemas.common import Pagina
 from app.schemas.empresa import EmpresaCreate, EmpresaRead, EmpresaUpdate, EstadoEmpresa
@@ -100,8 +112,12 @@ async def actualizar_empresa(
     empresa_id: int, datos: EmpresaUpdate, db: DbDep, actual: GestorDep
 ) -> Empresa:
     actual.exigir_acceso_a_empresa(empresa_id)
-    empresa = await _obtener_o_404(db, empresa_id)
     cambios = datos.model_dump(exclude_unset=True)
+    actual.exigir_campos_de_empresa_permitidos(cambios)
+    if cambios.get("estado", ESTADO_EMPRESA_ACTIVA) != ESTADO_EMPRESA_ACTIVA:
+        actual.exigir_no_es_su_propia_empresa(empresa_id)
+
+    empresa = await _obtener_o_404(db, empresa_id)
     if "nif" in cambios:
         await _exigir_nif_libre(db, cambios["nif"], excluir_id=empresa_id)
     for campo, valor in cambios.items():
@@ -114,6 +130,7 @@ async def actualizar_empresa(
 
 @router.delete("/{empresa_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Dar de baja una empresa")
 async def desactivar_empresa(empresa_id: int, db: DbDep, actual: AdminDep) -> None:
+    actual.exigir_no_es_su_propia_empresa(empresa_id)
     empresa = await _obtener_o_404(db, empresa_id)
     empresa.estado = "inactiva"
     empresa.updated_by = actual.id

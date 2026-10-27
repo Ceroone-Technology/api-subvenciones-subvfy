@@ -13,8 +13,10 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.convocatoria import NIVELES_ADMINISTRACION
+from app.services.convocatoria_estado import EstadoConvocatoria
 
-NivelAdministracion = Literal[NIVELES_ADMINISTRACION]
+# Literal[tupla] funciona en runtime pero mypy no lo acepta (ver CLAUDE.md): de ahí el ignore.
+NivelAdministracion = Literal[NIVELES_ADMINISTRACION]  # type: ignore[valid-type]
 CodigoBdns = Annotated[str, Field(min_length=1, max_length=30)]
 
 
@@ -50,3 +52,60 @@ class ConvocatoriaRead(BaseModel):
     url_portal_oficial: str | None
     financiada_mrr: bool
     sincronizado_at: datetime
+
+
+# --- Búsqueda local (`bdns-local-sync`, PR4) ---------------------------------
+
+
+class ConvocatoriaResumen(BaseModel):
+    """Fila del buscador. `estado` se calcula en SQL contra el día de hoy en Madrid."""
+
+    id: int
+    codigo_bdns: str
+    titulo: str
+    nivel_administracion: str | None
+    administracion: str | None
+    organo_convocante: str | None
+    fecha_registro: date | None
+    fecha_inicio_solicitud: date | None
+    fecha_fin_solicitud: date | None
+    estado: EstadoConvocatoria
+    plazo_permanente: bool
+    presupuesto_total: float | None
+    financiada_mrr: bool
+    tipo_convocatoria: str | None
+    finalidad: str | None
+    url_portal_oficial: str | None
+
+
+class DocumentoConvocatoria(BaseModel):
+    """Documento de la ficha. Sin `url` hasta el PR de documentos (ruta propia, nunca un host de la BDNS)."""
+
+    id: int
+    nombre: str | None = None
+    descripcion: str | None = None
+    tamano_bytes: int | None = None
+    fecha_modificacion: str | None = None
+    fecha_publicacion: str | None = None
+
+
+class ConvocatoriaDetalle(ConvocatoriaResumen):
+    sede_electronica: str | None
+    url_bases_reguladoras: str | None
+    beneficiarios: list[str]
+    sectores: list[str]
+    instrumentos: list[str]
+    fondos: list[str]
+    objetivos: list[str]
+    regiones: list[str]
+    bases_reguladoras: str | None
+    documentos: list[DocumentoConvocatoria]
+    retirada: bool
+    ultima_actualizacion: datetime | None
+
+
+class ResumenConvocatorias(BaseModel):
+    abiertas: int
+    presupuesto_abiertas: float
+    total: int
+    ultima_sincronizacion: datetime | None

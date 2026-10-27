@@ -6,7 +6,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 from app.models.base import AuditMixin
 
-ESTADOS_ENVIO = ("enviado", "sin_novedades", "error")
+# pendiente_envio: hay novedades registradas pero el aviso todavía no ha
+# salido. El envío es otra funcionalidad; hasta entonces marcar "enviado"
+# sería mentir en un historial que el frontend muestra.
+ESTADOS_ENVIO = ("pendiente_envio", "enviado", "sin_novedades", "error")
 
 
 class AlertaEjecucion(Base, AuditMixin):

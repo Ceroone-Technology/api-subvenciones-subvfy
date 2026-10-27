@@ -29,9 +29,22 @@ from sqlalchemy import delete, select
 from app.core.security import crear_access_token, hashear_password
 from app.database import AsyncSessionLocal
 from app.main import app
-from app.models import Convocatoria, Empresa, Rol, Usuario
+from app.models import (
+    Alerta,
+    AlertaEjecucion,
+    AlertaEjecucionConvocatoria,
+    CatalogoBdns,
+    Convocatoria,
+    Empresa,
+    Rol,
+    SyncRun,
+    Usuario,
+)
 
 NIF_PREFIJO_TEST = "TEST-"
+# Marks the free-text field of `catalogo_bdns` (descripcion) and `sync_run`
+# (error_detalle) so the teardown can find the rows tests created.
+MARCA_TEST = "TEST-"
 # Subdominio de example.com (RFC 2606, nunca entregable) y no un TLD
 # reservado como .test: email-validator, que usa Pydantic para EmailStr,
 # rechaza .test/.invalid/.localhost como direcciones no válidas.
@@ -112,6 +125,50 @@ async def crear_sesion_en_bd(
         )
 
 
+async def crear_convocatoria_en_bd(titulo: str = "Ayudas a la digitalización", **extra) -> Convocatoria:
+    """Siembra una fila de la caché local de convocatorias.
+
+    Los favoritos la crean por la API al marcarlos, pero alertas y análisis
+    la necesitan ya existente: la devuelve desasociada de la sesión, así que
+    quien la use debe recargarla en la suya (o quedarse con el id).
+    """
+    async with AsyncSessionLocal() as db:
+        convocatoria = Convocatoria(codigo_bdns=codigo_bdns_de_prueba(), titulo=titulo, **extra)
+        db.add(convocatoria)
+        await db.commit()
+        await db.refresh(convocatoria)
+        db.expunge(convocatoria)
+        return convocatoria
+
+
+async def cambiar_estado_de_empresa(empresa_id: int, estado: str) -> None:
+    """Da de baja (o reactiva) una empresa directamente en la base de datos.
+
+    Por la API lo haría un admin, pero varios tests necesitan la empresa ya
+    inactiva *antes* de autenticarse, que es justo el caso que importa.
+    """
+    async with AsyncSessionLocal() as db:
+        empresa = await db.get(Empresa, empresa_id)
+        assert empresa is not None
+        empresa.estado = estado
+        await db.commit()
+
+
+async def crear_alerta_en_bd(usuario_id: int, **extra) -> int:
+    """Devuelve el id: la alerta se recarga en la sesión donde vaya a usarse."""
+    async with AsyncSessionLocal() as db:
+        alerta = Alerta(
+            usuario_id=usuario_id,
+            nombre=extra.pop("nombre", "Alerta de prueba"),
+            created_by=usuario_id,
+            updated_by=usuario_id,
+            **extra,
+        )
+        db.add(alerta)
+        await db.commit()
+        return alerta.id
+
+
 @pytest_asyncio.fixture
 async def client() -> AsyncGenerator[AsyncClient, None]:
     """Cliente sin autenticar. Solo para los tests de 401."""
@@ -141,6 +198,39 @@ async def limpiar_datos_de_test() -> AsyncGenerator[None, None]:
             .where(Convocatoria.codigo_bdns.like(f"{CODIGO_BDNS_PREFIJO_TEST}%"))
             .values(created_by=None, updated_by=None)
         )
+        # El sync firma con el usuario de sistema, que nunca se borra, pero un
+        # test puede firmar con un usuario de prueba: sus filas se borran antes
+        # que los usuarios (FK de auditoría), igual que las marcadas con TEST-.
+        usuarios_firmantes = select(Usuario.id).where(Usuario.email.like(f"%{EMAIL_DOMINIO_TEST}"))
+        await db.execute(
+            delete(CatalogoBdns).where(
+                CatalogoBdns.descripcion.like(f"{MARCA_TEST}%")
+                | CatalogoBdns.created_by.in_(usuarios_firmantes)
+                | CatalogoBdns.updated_by.in_(usuarios_firmantes)
+            )
+        )
+        await db.execute(
+            delete(SyncRun).where(
+                SyncRun.error_detalle.like(f"{MARCA_TEST}%")
+                | SyncRun.created_by.in_(usuarios_firmantes)
+                | SyncRun.updated_by.in_(usuarios_firmantes)
+            )
+        )
+        # Las alertas no pueden esperar a la cascada del usuario: sus filtros
+        # quedan a dos niveles (usuario -> alerta -> alerta_organo) y
+        # Postgres comprueba su FK de auditoría created_by -> usuario antes de
+        # que esa cascada llegue a borrarlos.
+        usuarios_de_test = select(Usuario.id).where(Usuario.email.like(f"%{EMAIL_DOMINIO_TEST}"))
+        # De dentro hacia fuera, y siempre con los usuarios todavía vivos: las
+        # FKs de auditoría de estas tres tablas apuntan a usuario.id.
+        alertas_de_test = select(Alerta.id).where(Alerta.usuario_id.in_(usuarios_de_test))
+        await db.execute(
+            delete(AlertaEjecucionConvocatoria).where(
+                AlertaEjecucionConvocatoria.alerta_id.in_(alertas_de_test)
+            )
+        )
+        await db.execute(delete(AlertaEjecucion).where(AlertaEjecucion.alerta_id.in_(alertas_de_test)))
+        await db.execute(delete(Alerta).where(Alerta.usuario_id.in_(usuarios_de_test)))
         # Usuarios primero (sus favoritos caen por ON DELETE CASCADE), luego
         # las convocatorias cacheadas y por ultimo las empresas.
         await db.execute(delete(Usuario).where(Usuario.email.like(f"%{EMAIL_DOMINIO_TEST}")))
@@ -189,6 +279,32 @@ async def gestor(empresa: dict) -> Sesion:
 @pytest_asyncio.fixture
 async def usuario_raso(empresa: dict) -> Sesion:
     return await crear_sesion_en_bd(empresa["id"], "usuario")
+
+
+@pytest_asyncio.fixture
+async def admin_de_la_empresa(empresa: dict) -> Sesion:
+    """Un admin que **comparte empresa** con el gestor, al revés que la fixture
+    `admin`. Es el escenario que hacía invisible la escalada de AUD-002: si el
+    admin siempre vive en otra empresa, el gestor nunca lo tiene a tiro."""
+    return await crear_sesion_en_bd(empresa["id"], "admin")
+
+
+@pytest_asyncio.fixture
+async def otro_gestor(empresa: dict) -> Sesion:
+    """Segundo gestor en la misma empresa: un gestor no gestiona a sus pares."""
+    return await crear_sesion_en_bd(empresa["id"], "gestor")
+
+
+@pytest_asyncio.fixture
+async def rol_admin_id() -> int:
+    async with AsyncSessionLocal() as db:
+        return (await db.execute(select(Rol.id).where(Rol.codigo == "admin"))).scalar_one()
+
+
+@pytest_asyncio.fixture
+async def rol_gestor_id() -> int:
+    async with AsyncSessionLocal() as db:
+        return (await db.execute(select(Rol.id).where(Rol.codigo == "gestor"))).scalar_one()
 
 
 def _cliente_autenticado(sesion: Sesion) -> AsyncClient:

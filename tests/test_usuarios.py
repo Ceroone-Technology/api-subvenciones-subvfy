@@ -175,6 +175,9 @@ async def test_baja_logica_de_usuario(
 @pytest.mark.asyncio
 async def test_no_puedes_darte_de_baja_a_ti_mismo(client_admin: AsyncClient, admin) -> None:
     """Sin esta guarda, el único admin de una instalación puede dejarse fuera
-    con una sola llamada y ya no hay quien lo reactive por la API."""
+    con una sola llamada y ya no hay quien lo reactive por la API.
+
+    Devuelve 403 y no 409: lo que falla es el permiso (nadie se gestiona a sí
+    mismo en lo que toca a rol, estado y baja), no un conflicto de estado."""
     respuesta = await client_admin.delete(f"/usuarios/{admin.id}")
-    assert respuesta.status_code == 409
+    assert respuesta.status_code == 403

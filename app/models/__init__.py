@@ -10,13 +10,15 @@ from app.models.alerta_ejecucion_convocatoria import AlertaEjecucionConvocatoria
 from app.models.alerta_organo import AlertaOrgano
 from app.models.alerta_region import AlertaRegion
 from app.models.analisis_ia import AnalisisIA
-from app.models.convocatoria import Convocatoria
+from app.models.catalogo_bdns import CatalogoBdns
 from app.models.conversacion_asistente import ConversacionAsistente
+from app.models.convocatoria import Convocatoria
 from app.models.empresa import Empresa
 from app.models.empresa_palabra_clave import EmpresaPalabraClave
 from app.models.favorito import Favorito
 from app.models.mensaje_asistente import MensajeAsistente
 from app.models.rol import Rol
+from app.models.sync_run import SyncRun
 from app.models.usuario import Usuario
 
 __all__ = [
@@ -26,6 +28,7 @@ __all__ = [
     "AlertaOrgano",
     "AlertaRegion",
     "AnalisisIA",
+    "CatalogoBdns",
     "Convocatoria",
     "ConversacionAsistente",
     "Empresa",
@@ -33,5 +36,6 @@ __all__ = [
     "Favorito",
     "MensajeAsistente",
     "Rol",
+    "SyncRun",
     "Usuario",
 ]

@@ -8,21 +8,30 @@ sesión por request y la cierra sola al terminar.
 from collections.abc import AsyncGenerator
 
 from sqlalchemy import BigInteger
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import NullPool
 
-from app.config import settings
+from app.config import Settings, settings
 
-# NullPool: sin pool de conexiones persistente. Es la recomendación oficial
-# de SQLAlchemy para entornos donde el event loop puede cambiar entre usos
-# del engine (exactamente el caso de AWS Lambda, nuestro destino de
-# despliegue — cada invocación puede correr en un loop distinto — y el de
-# los tests con pytest-asyncio). El coste es abrir una conexión nueva por
-# request en vez de reusar una del pool; a este volumen no es relevante.
-engine = create_async_engine(
-    settings.database_url, echo=settings.environment == "development", poolclass=NullPool
-)
+
+def crear_engine(config: Settings) -> AsyncEngine:
+    """Engine a partir de una configuración concreta (los tests pasan la suya).
+
+    NullPool: sin pool de conexiones persistente. Es la recomendación oficial
+    de SQLAlchemy para entornos donde el event loop puede cambiar entre usos
+    del engine (exactamente el caso de AWS Lambda, nuestro destino de
+    despliegue — cada invocación puede correr en un loop distinto — y el de
+    los tests con pytest-asyncio). El coste es abrir una conexión nueva por
+    request en vez de reusar una del pool; a este volumen no es relevante.
+
+    El echo depende solo de DATABASE_ECHO, nunca del entorno: vuelca cada
+    sentencia con sus parámetros, hashes de contraseña incluidos (AUD-012).
+    """
+    return create_async_engine(config.database_url, echo=config.database_echo, poolclass=NullPool)
+
+
+engine = crear_engine(settings)
 
 AsyncSessionLocal = async_sessionmaker(bind=engine, expire_on_commit=False, class_=AsyncSession)
 

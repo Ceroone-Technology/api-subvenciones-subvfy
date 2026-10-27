@@ -2,16 +2,23 @@
 
 from datetime import UTC, datetime, timedelta
 
+import jwt
 import pytest
 from httpx import AsyncClient
-from jose import jwt
 from sqlalchemy import select
 
+from app.api.routes import auth as auth_router
 from app.config import settings
 from app.core.security import TIPO_ACCESS, crear_access_token, crear_refresh_token
 from app.database import AsyncSessionLocal
 from app.models import Usuario
-from tests.conftest import PASSWORD_TEST, Sesion, crear_sesion_en_bd
+from app.services.sistema import EMAIL_SISTEMA
+from tests.conftest import (
+    PASSWORD_TEST,
+    Sesion,
+    cambiar_estado_de_empresa,
+    crear_sesion_en_bd,
+)
 
 
 @pytest.mark.asyncio
@@ -72,6 +79,52 @@ async def test_login_email_inexistente_responde_igual_que_password_mala(
 
 
 @pytest.mark.asyncio
+async def test_el_login_verifica_un_hash_tambien_con_un_email_inexistente(
+    client: AsyncClient, gestor: Sesion, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AUD-010: el mensaje ya era el mismo en los dos casos, pero el tiempo no.
+
+    Con `usuario is None or not verificar_password(...)`, un email inexistente
+    cortocircuitaba el `or` y bcrypt no llegaba a ejecutarse: medido en la
+    auditoría, 55 ms frente a 273 ms. Una sola petición bastaba para saber si
+    una dirección está dada de alta.
+
+    Se espía la función en vez de cronometrar: un umbral de tiempo es frágil en
+    el CI, que comparte CPU, y lo que de verdad se quiere afirmar es que el
+    coste de bcrypt se paga en las dos ramas. El espía llama a la función real,
+    así que el login sigue comportándose igual.
+    """
+    verificaciones: list[str] = []
+    real = auth_router.verificar_password
+
+    def espia(password: str, password_hash: str) -> bool:
+        verificaciones.append(password_hash)
+        return real(password, password_hash)
+
+    # Sobre el módulo del router, que es donde se importó por nombre: parchear
+    # `app.core.security` no interceptaría nada.
+    monkeypatch.setattr(auth_router, "verificar_password", espia)
+
+    inexistente = await client.post(
+        "/auth/login",
+        json={"email": "no-existe@test.subvfy.example.com", "password": PASSWORD_TEST},
+    )
+    assert len(verificaciones) == 1, "con un email inexistente no se verificó ningún hash"
+
+    password_mala = await client.post(
+        "/auth/login", json={"email": gestor.email, "password": "no-es-la-buena"}
+    )
+    assert len(verificaciones) == 2, "con un email real debería verificarse una sola vez"
+
+    # El hash de relleno no puede ser el del usuario, ni al revés.
+    assert verificaciones[0] != verificaciones[1]
+
+    # Y la respuesta sigue siendo indistinguible.
+    assert inexistente.status_code == password_mala.status_code == 401
+    assert inexistente.json() == password_mala.json()
+
+
+@pytest.mark.asyncio
 async def test_login_de_cuenta_bloqueada(client: AsyncClient, empresa: dict) -> None:
     bloqueado = await crear_sesion_en_bd(empresa["id"], "usuario", estado="bloqueado")
     respuesta = await client.post(
@@ -79,6 +132,108 @@ async def test_login_de_cuenta_bloqueada(client: AsyncClient, empresa: dict) -> 
     )
     assert respuesta.status_code == 403
     assert "bloqueado" in respuesta.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_la_cuenta_de_sistema_no_puede_iniciar_sesion(client: AsyncClient) -> None:
+    """`sistema@subvfy.es` (seed de `b7f3c21a9d40`) es la identidad de auditoría
+    de los procesos automáticos, no una cuenta de acceso: nace `bloqueado` y
+    con una contraseña aleatoria que se descarta.
+
+    Lo que se afirma es que no se puede entrar y que sigue bloqueada. El 401 y
+    no el 403 del estado es lo que corresponde: la contraseña falla antes, así
+    que ni siquiera se llega a decir que la cuenta existe.
+    """
+    respuesta = await client.post(
+        "/auth/login", json={"email": EMAIL_SISTEMA, "password": PASSWORD_TEST}
+    )
+    assert respuesta.status_code == 401
+    assert respuesta.json()["detail"] == "Email o contraseña incorrectos."
+
+    async with AsyncSessionLocal() as db:
+        estado = await db.scalar(select(Usuario.estado).where(Usuario.email == EMAIL_SISTEMA))
+    assert estado == "bloqueado", "la cuenta de sistema no debe quedar utilizable"
+
+
+# --- Baja de la empresa (AUD-009) ----------------------------------------------
+#
+# Dar de baja una empresa corta el acceso de toda su gente, sin tocar sus
+# filas: en un producto B2B el tenant es la unidad de facturación, y que la
+# baja obligue a desactivar usuario por usuario es un agujero de negocio.
+# Cada canal responde como ya responde a una cuenta no activa: 403 con motivo
+# en login y en los endpoints, 401 genérico en el refresh.
+
+
+@pytest.mark.asyncio
+async def test_con_la_empresa_de_baja_no_se_entra_ni_se_opera(
+    client: AsyncClient, empresa: dict, gestor: Sesion
+) -> None:
+    await cambiar_estado_de_empresa(empresa["id"], "inactiva")
+
+    login = await client.post("/auth/login", json={"email": gestor.email, "password": PASSWORD_TEST})
+    assert login.status_code == 403, login.text
+    assert login.json()["detail"] == "La empresa está dada de baja."
+
+    # Y un token emitido antes de la baja deja de servir en el acto: la
+    # dependencia relee usuario y empresa en cada petición.
+    me = await client.get("/auth/me", headers={"Authorization": f"Bearer {gestor.token}"})
+    assert me.status_code == 403, me.text
+    assert me.json()["detail"] == "La empresa está dada de baja."
+
+    alertas = await client.get("/alertas", headers={"Authorization": f"Bearer {gestor.token}"})
+    assert alertas.status_code == 403, alertas.text
+
+
+@pytest.mark.asyncio
+async def test_el_refresh_de_una_empresa_de_baja_responde_401(
+    client: AsyncClient, empresa: dict, gestor: Sesion
+) -> None:
+    """401 genérico y no 403: en el refresh ese código ya cubre a la vez el
+    token inservible y la cuenta inutilizable, como con un usuario de baja."""
+    refresh = crear_refresh_token(gestor.id)
+    await cambiar_estado_de_empresa(empresa["id"], "inactiva")
+
+    respuesta = await client.post("/auth/refresh", json={"refresh_token": refresh})
+    assert respuesta.status_code == 401, respuesta.text
+    assert respuesta.json()["detail"] == "Refresh token inválido o caducado."
+
+
+@pytest.mark.asyncio
+async def test_la_empresa_de_baja_no_cambia_el_401_de_una_password_mala(
+    client: AsyncClient, empresa: dict, gestor: Sesion
+) -> None:
+    """La empresa se mira **después** de verificar la contraseña, igual que el
+    estado del usuario: si no, el 403 delataría qué direcciones existen sin
+    necesidad de acertar la contraseña (el canal que cerró AUD-010)."""
+    await cambiar_estado_de_empresa(empresa["id"], "inactiva")
+
+    respuesta = await client.post(
+        "/auth/login", json={"email": gestor.email, "password": "no-es-la-buena"}
+    )
+    assert respuesta.status_code == 401, respuesta.text
+    assert respuesta.json()["detail"] == "Email o contraseña incorrectos."
+
+
+@pytest.mark.asyncio
+async def test_al_reactivar_la_empresa_vuelve_el_acceso(
+    client: AsyncClient, empresa: dict, gestor: Sesion
+) -> None:
+    """Sin tocar a los usuarios: sus filas nunca se modificaron, así que la
+    reactivación no tiene que deshacer nada."""
+    await cambiar_estado_de_empresa(empresa["id"], "inactiva")
+    assert (
+        await client.post("/auth/login", json={"email": gestor.email, "password": PASSWORD_TEST})
+    ).status_code == 403
+
+    await cambiar_estado_de_empresa(empresa["id"], "activa")
+
+    login = await client.post("/auth/login", json={"email": gestor.email, "password": PASSWORD_TEST})
+    assert login.status_code == 200, login.text
+    me = await client.get(
+        "/auth/me", headers={"Authorization": f"Bearer {login.json()['access_token']}"}
+    )
+    assert me.status_code == 200
+    assert me.json()["estado"] == "activo", "la baja de la empresa no debe tocar al usuario"
 
 
 @pytest.mark.asyncio

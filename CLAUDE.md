@@ -8,7 +8,7 @@ API REST para un buscador de subvenciones (BDNS) con Favoritos, Alertas, Autenti
 
 ## Stack (decisión cerrada, no reabrir sin razón)
 
-FastAPI + SQLAlchemy 2.0 (async) + Alembic + Pydantic v2, sobre PostgreSQL vía asyncpg. JWT (python-jose + passlib/bcrypt) para autenticación. APScheduler en proceso para el motor de Alertas en local — en producción (AWS Lambda) se reemplaza por EventBridge Scheduler + una Lambda separada, ver más abajo. Anthropic SDK (Python) para Análisis con IA y Asistente IA. pytest + httpx.AsyncClient para tests. Docker/docker-compose para desarrollo local.
+FastAPI + SQLAlchemy 2.0 (async) + Alembic + Pydantic v2, sobre PostgreSQL vía asyncpg. JWT con PyJWT y contraseñas con bcrypt directo para autenticación (python-jose y passlib se retiraron en el ticket 8 de la auditoría, AUD-004: ver "Librerías de autenticación"). APScheduler en proceso para el motor de Alertas en local — en producción (AWS Lambda) se reemplaza por EventBridge Scheduler + una Lambda separada, ver más abajo. Anthropic SDK (Python) para Análisis con IA y Asistente IA. pytest + httpx.AsyncClient para tests. Docker/docker-compose para desarrollo local.
 
 **Por qué Python y no Node.js/TypeScript**: hubo una reunión paralela (Luis Huapaya) donde se acordó Node.js/TS para un track de trabajo distinto ("Subfy", con frontend React y practicantes). Para *esta* API se decidió mantener Python porque ya estaba construido y probado, y evita reescribir trabajo entregado. Si alguien pregunta por qué no coincide con esa reunión, esta es la razón.
 
@@ -18,6 +18,7 @@ FastAPI + SQLAlchemy 2.0 (async) + Alembic + Pydantic v2, sobre PostgreSQL vía 
 - **Base de datos**: **Railway PostgreSQL** (no RDS, no DynamoDB) — mismo `DATABASE_URL`/asyncpg sin cambios de código. Se descartó DynamoDB porque el modelo es relacional y normalizado (14 tablas, FKs) — migrarlo sería tirar el diseño ya hecho.
 - **Motor de Alertas**: en Lambda no tiene sentido `APScheduler` en proceso (no hay estado entre invocaciones) — se reemplaza por una función Lambda propia disparada por **EventBridge Scheduler**.
 - **`NullPool` en `app/database.py` es intencional**: no es solo para tests (evita el bug de asyncpg "attached to a different loop" entre tests), es la config correcta para Lambda, donde un pool de conexiones persistente no aporta nada porque el runtime puede cambiar de event loop entre invocaciones. No lo cambies a un pool con conexiones persistentes sin volver a evaluar esto.
+- **Runtime: `python3.12`**, la misma versión que CI, imagen y herramientas. Corre sobre Amazon Linux 2023 y AWS lo depreca el 31/10/2028; `python3.11` va sobre Amazon Linux 2, fuera de soporte desde el 30/06/2026 (AWS solo le aplica parches críticos hasta deprecarlo en junio de 2027). Subir a 3.13 o 3.14 (soporte hasta junio de 2029) queda como decisión del Hito 7, no tomada: obligaría a mover las tres piezas a la vez y a revalidar las dependencias.
 - Esto se implementa recién en el Hito 7 (Despliegue) del backlog — no bloquea el desarrollo funcional actual.
 
 ## Diseño de base de datos
@@ -30,6 +31,8 @@ Auditoría uniforme: todas las tablas tienen `created_at`/`updated_at`/`created_
 
 **Gotcha ya resuelto, no lo reintroduzcas**: `rol`, `empresa` y `usuario` tienen una dependencia circular de auditoría (se referencian entre sí). Alembic autogenerate mete el `ForeignKeyConstraint(..., use_alter=True)` dentro de `op.create_table()`, pero eso **no emite el `ALTER TABLE`** — la FK queda invisible en la base de datos real aunque aparece en el archivo de migración. La forma correcta: sacarlas de `create_table()` y añadirlas con `op.create_foreign_key()` al final de `upgrade()` (con su `op.drop_constraint()` al inicio de `downgrade()`). Ya está así en `alembic/versions/827c98b6a656_esquema_inicial_subvfy.py` — revisa ese patrón antes de generar una migración nueva que toque estas tres tablas.
 
+**Gotcha de la misma familia, y tampoco lo reintroduzcas**: **Alembic no compara constraints CHECK**. Cambiar la tupla de valores válidos de un modelo (añadir un estado a `ESTADOS_ENVIO`, por ejemplo) no aparece en `alembic revision --autogenerate`: la migración sale vacía de ese cambio y el CHECK real sigue rechazando el valor nuevo en cuanto alguien lo inserta. Hay que escribirlo **a mano**, con `op.drop_constraint(..., type_="check")` + `op.create_check_constraint(...)` en `upgrade()`, y lo simétrico en `downgrade()`. Y en el `downgrade` hay que **recolocar antes las filas que usen el valor que se va**, o el CHECK antiguo no se puede crear: ver `d8c5e0cf33c8`, que pasa las ejecuciones en `pendiente_envio` a `enviado` antes de restaurarlo. La regla general: de una migración autogenerada, revisa siempre lo que Alembic **no** mira — CHECKs y estas FKs.
+
 ## Backlog: Hito → Funcionalidad → Tarea
 
 El desarrollo completo está desglosado en `D:\Trabajo\BigToOne\Subvenciones\api-hitos-funcionalidades-tareas-subvfy.docx` (103h de las 166h totales del proyecto ya aprobadas — el resto es frontend, en `hitos-tareas-subvfy.docx`, misma carpeta). Estado:
@@ -39,8 +42,41 @@ El desarrollo completo está desglosado en `D:\Trabajo\BigToOne\Subvenciones\api
 - **Hito 2, Funcionalidad 3 — API de empresa/rol/usuario**: hecho. Schemas en `app/schemas/`, routers en `app/api/routes/` (`roles.py`, `empresas.py`, `usuarios.py`), hashing de contraseñas en `app/core/security.py`, 28 tests verdes contra Postgres real.
 - **Hito 2, Funcionalidad 4 — Autenticación real (JWT)**: hecho. JWT en `app/core/security.py`, permisos en `app/core/permisos.py`, router en `app/api/routes/auth.py`, arranque en frío en `app/cli.py`, seed del usuario de sistema en `b7f3c21a9d40`. 70 tests verdes.
 - **Hito 3, Funcionalidad 1 — Endpoints de favoritos**: hecho. Router en `app/api/routes/favoritos.py`, schemas de favorito y convocatoria. 85 tests verdes.
-- **Hito 4, Funcionalidad 1 — CRUD de alertas (10 h)**: **siguiente tarea**. Mutaciones de alerta + normalización de filtros de órgano y región (tablas `alerta`, `alerta_organo`, `alerta_region`).
+- **Hito 4, Funcionalidad 1 — CRUD de alertas (10 h)**: hecho (mutaciones). Router en `app/api/routes/alertas.py`, lógica en `app/services/alertas.py`, normalización de filtros en `app/services/filtros.py`, índices en `e4a19c7d2b58`. 119 tests verdes (34 nuevos), ruff y mypy limpios.
+- **Hito 4 — Listado y detalle de alertas**: hecho. `GET /alertas` (paginado con `PaginacionDep`/`Pagina[T]`, filtros `organo_id`/`region_id`/`activa`) y `GET /alertas/{id}` en el mismo router y servicio; los 404 están declarados en el OpenAPI del detalle, el PATCH y el DELETE. 142 tests verdes (23 nuevos en `tests/test_alertas_listado.py`), ruff y mypy limpios.
+- **Hito 4 — Historial de ejecuciones por alerta**: hecho, **solo lectura**. `GET /alertas/{id}/ejecuciones` (paginado, filtro `estado_envio`) y `GET /alertas/{id}/ejecuciones/{ejecucion_id}` (con las convocatorias detectadas), en el router de alertas y en `app/services/alerta_ejecuciones.py`. Sin modelo nuevo ni migración: `AlertaEjecucion` y `AlertaEjecucionConvocatoria` ya estaban en `827c98b6a656`. 159 tests verdes (17 nuevos), ruff y mypy limpios.
+- **Hito 4 — Motor de ejecución de alertas, tarea 1 de 3 (job programado)**: hecho. Servicio en `app/services/motor_alertas.py` (selección por frecuencia + ciclo con aislamiento de fallos), disparador en `app/core/scheduler.py` (APScheduler 3.x, `AsyncIOScheduler`) enganchado al `lifespan` de `app/main.py`, e identidad de los procesos automáticos en `app/services/sistema.py`. 185 tests verdes (15 nuevos), ruff y mypy limpios. Con la tarea 3, el historial ya se escribe.
+- **Hito 4 — Motor de ejecución de alertas, tarea 2 de 3 (consulta a la BDNS)**: hecho. Constructor puro en `app/services/bdns_consulta.py` y cliente HTTP en `app/services/bdns_cliente.py`, enganchados en `evaluar_alerta`. 219 tests verdes (34 nuevos), ruff y mypy limpios.
+- **Hito 4 — Ejecuciones fallidas de alerta visibles y con reintentos espaciados**: hecho. `registrar_fallo` en `app/services/deduplicacion_alertas.py`, columnas `alerta.fallos_consecutivos` y `alerta.proximo_reintento_at` (migración `a3f9d27c51b8`, escrita a mano), selección y reinicio en `app/services/motor_alertas.py`, reinicio en el `PATCH` de `app/services/alertas.py`. 255 tests verdes (11 nuevos), ruff y mypy limpios. Detalle en la sección del motor.
+- **Hito 4 — Motor de ejecución de alertas, tarea 3 de 3 (deduplicación y registro)**: hecho. Servicio en `app/services/deduplicacion_alertas.py`, migración `d8c5e0cf33c8` (`alerta_ejecucion_convocatoria.alerta_id` + `UNIQUE(alerta_id, convocatoria_id)`, y `estado_envio` admite `pendiente_envio`). **Queda pendiente el envío del aviso**, que es otra funcionalidad: las ejecuciones con novedades se quedan en `pendiente_envio`. 229 tests verdes (10 nuevos), ruff y mypy limpios.
+- **Hito 4 — Cobertura de integración del CRUD de alertas**: hecho, solo tests (`tests/test_alertas.py`, 11 nuevos; 170 verdes con el historial ya integrado). Cierran cuatro huecos sobre reglas ya documentadas: el DELETE arrastra `alerta_ejecucion` y su tabla intermedia pero conserva la convocatoria cacheada; los límites de campo (`nombre`, `texto_busqueda`, `nivel_administracion`, `canal_notificacion`, `MAX_FILTROS`) validados entrando por HTTP; el rol `usuario` gestiona sus propias alertas (los endpoints no exigen gestor) y no alcanza las de un compañero; y `usuario_id`/`id` en el body no reasignan el propietario ni al crear ni al editar.
 - Hito 4 (Alertas, 22 h), Hito 5 (Análisis con IA), Hito 6 (Ficha ampliada, sin cambios de backend), Hito 7 (Cierre): pendientes, ver el .docx para el desglose de tareas y horas de cada uno.
+
+## Flujo de ramas (decisión cerrada, desde el 22/09/2026)
+
+**No se sube a `main`.** La rama de integración es **`develop`**.
+
+- Todo el trabajo se integra en `develop`: las ramas salen de `develop` y el PR va **contra `develop`**.
+- `main` está protegida: solo recibe PRs **desde `develop`**, y solo con el CI en verde. No acepta push directo.
+- **CI en cada PR** (`.github/workflows/ci.yml`, GitHub Actions): `alembic upgrade head`, `ruff check .`, `mypy app` y `pytest -q` contra un PostgreSQL 16 real. Se lanza en los PRs y en los push a `develop`/`main`. Si falla algo, el PR no se puede mergear.
+
+```bash
+git fetch origin
+git checkout develop
+git pull
+git checkout -b feature/lo-que-toque
+# ... trabajo, commits ...
+git push -u origin feature/lo-que-toque
+# abrir el PR contra develop, no contra main
+```
+
+Reglas para Claude Code en este repo:
+- Nunca hagas push a `main`, ni directo ni con un PR desde una rama de feature. Al crear un PR, `--base develop` siempre de forma explícita: el default del repo en GitHub sigue siendo `main`.
+- Antes de empezar una tarea, crea la rama desde `origin/develop` actualizado, no desde `main`.
+- Si hay que rebasar una rama ya publicada, pregunta primero y usa `git push --force-with-lease`, nunca `--force` a secas.
+- Antes de abrir el PR, corre en local lo mismo que el CI (ver la sección siguiente). Así no descubres en el PR lo que podías ver antes.
+
+**Versión de Python: 3.12 en todas partes.** El CI (`ci.yml`), el `Dockerfile` y `pyproject.toml` (ruff y mypy) usan la misma versión; si se cambia, se cambian las tres a la vez.
 
 ## Cómo correr y verificar
 
@@ -49,11 +85,39 @@ cp .env.example .env
 docker compose up -d --build
 docker compose exec api alembic upgrade head
 docker compose exec api pytest
+docker compose exec api ruff check .
+docker compose exec api mypy app
 ```
 
 La imagen de `docker-compose.yml` es de desarrollo: instala `requirements-dev.txt` y copia/monta `tests/`, por eso `pytest` corre dentro del contenedor (no hay intérprete con dependencias en el host). El empaquetado de producción (Lambda + Mangum) es del Hito 7 y será distinto.
 
-`GET /roles` con un token válido debe responder 200 con los tres roles sembrados: confirma app + config + conexión a BD + migraciones aplicadas. Antes de dar por cerrada cualquier tarea nueva, correr `pytest` contra una base real (no mocks) — así se detectó el bug de las FKs circulares.
+`GET /roles` con un token válido debe responder 200 con los tres roles sembrados: confirma app + config + conexión a BD + migraciones aplicadas. Antes de dar por cerrada cualquier tarea nueva, correr `pytest` contra una base real (no mocks) — así se detectó el bug de las FKs circulares —, además de `ruff check .` y `mypy app`, que deben salir limpios.
+
+**Tooling (desde Hito 4)**: ruff y mypy se configuran en `pyproject.toml`, que solo contiene configuración de herramientas; las dependencias siguen en `requirements*.txt`. `line-length = 120`, porque es el ancho que ya tenía el código. B008 se permite para `fastapi.Query`/`Depends`, que en la firma es el uso idiomático. Cada `Literal[TUPLA]` lleva un `# type: ignore[valid-type]` puntual: no desactives esa regla globalmente.
+
+**Gotcha de entorno — la imagen de desarrollo puede estar vieja**: `pyproject.toml` se copia en el build (y se monta como volumen), y ruff y mypy se instalan desde `requirements-dev.txt`. Si la imagen es anterior a esos cambios, dentro del contenedor no hay `pyproject.toml` ni ruff/mypy, y instalarlos a mano con `pip` **hace que corran sin la configuración del proyecto**: ruff pasa con las reglas por defecto y mypy da errores de stubs que no existen con la config real. Si `ruff` no aparece en el contenedor, o `ls /app` no muestra `pyproject.toml`, reconstruye con `docker compose up -d --build` (el volumen de la base de datos no se toca) en vez de instalar nada a mano.
+
+**Gotcha de entorno (Windows con Avast)**: el escudo web de Avast intercepta el HTTPS y el `pip install` del build falla con `CERTIFICATE_VERIFY_FAILED`, porque el contenedor no confía en el certificado raíz de Avast. Se resuelve excluyendo `pypi.org` y `files.pythonhosted.org` en Avast, no tocando el `Dockerfile` ni usando `--trusted-host`.
+
+## Configuración segura al arrancar (AUD-003, AUD-012)
+
+Decisiones cerradas con el usuario tras la auditoría del 06/10 — no las relajes sin preguntar. Todo vive en `Settings` (`app/config.py`) y falla **al construirlo**, es decir, al importar la app: es preferible no arrancar a descubrirlo en producción.
+
+- **`JWT_SECRET_KEY` es obligatoria**, sin valor por defecto en el código, mínimo 32 caracteres (`JWT_SECRET_KEY_MIN_CARACTERES`), **medidos tras quitar los espacios de los extremos** (40 espacios no arrancan). La comparación con los secretos públicos también se hace sin espacios, para que `" <valor de .env.example> "` no se cuele. El mensaje de error nombra la variable y el comando para generarla; el `"Field required"` de Pydantic la nombraba en minúsculas y sin decir qué hacer, por eso hay un `model_validator(mode="before")` propio.
+- **Fuera de `development` se rechazan los dos secretos públicos del repo**, `JWT_SECRET_KEY_EJEMPLO` (`.env.example`) y `JWT_SECRET_KEY_CI` (`ci.yml`). Si cambias cualquiera de esos dos valores, cambia la constante: `test_los_valores_publicos_son_los_del_repositorio` lo comprueba, pero **solo en el CI**, porque `.dockerignore` deja `.env.*` y `.github` fuera de la imagen y dentro del contenedor ese test se salta.
+- **`ENVIRONMENT` es `Literal["development", "production"]` y por defecto vale `production`**. Falla en cerrado: un despliegue que la olvide recibe las reglas estrictas, no las permisivas, y una errata (`prod`) no arranca. Si hace falta `staging`, se añade a `ENTORNOS` y se decide qué reglas le tocan.
+- **`JWT_ALGORITHM` solo admite `HS256`**, el único que se usa.
+- **`hide_input_in_errors=True` no es decorativo**: sin él, un `ValidationError` de `Settings` imprime en el log de arranque todo lo leído, secreto y `DATABASE_URL` con contraseña incluidos.
+- **El echo de SQL depende solo de `DATABASE_ECHO`** (`false` por defecto, también en development), nunca del entorno: vuelca cada sentencia con sus parámetros, hashes de contraseña incluidos. El engine se construye con `crear_engine(settings)` en `app/database.py` para poder probarlo con una configuración propia; `NullPool` no cambia.
+- **Fuera de este cambio, a propósito**: `ANTHROPIC_API_KEY` (hacerla obligatoria cuando el Hito 5 la use) y `DATABASE_URL` (su valor por defecto lleva credenciales; se resuelve con el gestor de secretos del Hito 7).
+
+**Pendiente, no decidido — el 422 devuelve lo recibido, contraseñas incluidas**: los errores de validación de Pydantic llevan el valor recibido en el campo `input` de cada error. En `POST /auth/login` con un body que no valida (por ejemplo, sin `Content-Type: application/json`), `input` es el body entero con la contraseña en claro; en el alta o el `PATCH` de usuario, la contraseña que no pasa el schema. Solo vuelve a quien hizo la petición, pero un proxy, un API Gateway o un log que guarde respuestas lo capturaría. No es nuevo: Pydantic v2 ya lo hacía, y FastAPI 0.141 solo lo documenta en el OpenAPI. Queda como ticket aparte, de la familia de AUD-012 (lo que acaba en los logs). Ahí se decidirá si se quita `input` de los 422 en general o solo en los endpoints con contraseña (un manejador de `RequestValidationError`).
+
+**Gotcha de despliegue (Hito 7)**: **`alembic` también carga `Settings`** (`alembic/env.py` importa `app.config.settings` para leer `DATABASE_URL`), así que **una migración sin `JWT_SECRET_KEY` no arranca**, aunque no firme ningún token. El paso de migraciones del despliegue necesita el mismo secreto (y el mismo `ENVIRONMENT`) que la Lambda, o un valor válido propio.
+
+**Gotcha de tests**: los tests de `tests/test_config.py` construyen su propio `Settings(_env_file=None)` y borran con `monkeypatch` las variables que inyectan docker compose y el CI; no usan el `settings` global, que ya se creó al importar la app. El resto de la suite saca el secreto del entorno del contenedor (`env_file: .env`) o del bloque `env:` del workflow, sin tocar `conftest.py`.
+
+**Gotcha de entorno**: `docker compose` inyecta el `.env` al **crear** el contenedor. Tras cambiar el `.env`, `docker compose up -d`; un `restart` sigue con los valores viejos.
 
 No hay endpoints `/health`: existieron como validación del scaffolding en el Hito 2 Funcionalidad 1 y se retiraron una vez que hubo endpoints de negocio. Si en el Hito 7 hace falta un check de liveness para API Gateway/Lambda, se vuelve a añadir entonces con ese propósito explícito.
 
@@ -73,9 +137,33 @@ No hay endpoints `/health`: existieron como validación del scaffolding en el Hi
 - `DELETE` sobre empresa/usuario es baja lógica (`estado`), no borrado físico: ambos aparecen en `created_by`/`updated_by` de todo el esquema.
 - Los valores únicos (NIF, email) se comprueban con un SELECT previo para devolver un 409 con mensaje útil, y las FK con un `db.get()` previo para devolver 400 en vez de dejar escapar un `ForeignKeyViolationError`.
 
-**Gotcha ya resuelto, no lo reintroduzcas**: `requirements.txt` fija `bcrypt==4.2.1`. `passlib[bcrypt]==1.7.4` no pone techo de versión, y con bcrypt >= 5.0 passlib no consigue cargar su backend (revienta en la detección con `ValueError: password cannot be longer than 72 bytes`), así que un build limpio sin ese pin deja el hashing de contraseñas inservible.
-
 **Gotcha de tests**: los emails de prueba no pueden usar el TLD `.test` (ni `.invalid`/`.localhost`) — `email-validator`, que es lo que hay detrás de `EmailStr`, los rechaza como direcciones no válidas. Se usa `@test.subvfy.example.com`.
+
+## Librerías de autenticación (AUD-004, ticket 8)
+
+Decisión reabierta con motivo y cerrada con el usuario: **PyJWT** sustituye a python-jose, y **bcrypt directo** a passlib. python-jose arrastraba avisos sin arreglo (PYSEC-2025-185, y los de `ecdsa`); passlib está sin mantenimiento desde 2020 y obligaba a fijar `bcrypt==4.2.1`. Ese pin ya no existe: no lo vuelvas a poner, ni vuelvas a meter passlib.
+
+- **Versiones**: `PyJWT==2.15.0` (sin extra `[crypto]`: HS256 no necesita `cryptography`) y `bcrypt==5.0.0`. La interfaz de `app/core/security.py` no cambió: el resto del código sigue usando `hashear_password`, `verificar_password`, `crear_*_token`, `leer_token` y `TokenInvalido`.
+- **`algorithms=[settings.jwt_algorithm]` al decodificar no se quita**: sin lista fija, la cabecera del token elegiría el algoritmo (`alg: none`, confusión de algoritmos). Tampoco `options={"require": ["exp", "iat", "sub"]}`: sin él, un token firmado con nuestra clave y sin `exp` no caducaría nunca (jose lo aceptaba, y PyJWT también por defecto). Todo token legítimo los lleva; si añades un tipo de token nuevo, también.
+- **Los hashes guardados no se migraron**: passlib y `bcrypt.gensalt(rounds=12)` producen el mismo `$2b$12$` de 60 caracteres. `tests/test_security.py` fija dos hashes **generados por passlib** como literales; si fallan, se ha roto la compatibilidad con lo que hay en producción.
+- **El límite de 72 bytes, y por qué hay un corte en `verificar_password`**:
+  - bcrypt 5 **lanza `ValueError`** con más de 72 bytes, en `hashpw` y en `checkpw`. passlib truncaba en silencio.
+  - Antes del cambio, el schema usaba `max_length=72`, que cuenta **caracteres**: 40 «ñ» (80 bytes) pasaban y se guardaba el hash de los primeros 72 bytes.
+  - Ahora el alias `Password` (alta y `PATCH` de usuario) valida **bytes UTF-8** y da 422, y la CLI hace lo mismo con su `SystemExit`. `hashear_password` **no corta**: si le llega algo más largo, lanza.
+  - **`verificar_password` sí corta a 72 bytes antes de `checkpw`**, igual que passlib. No es un descuido: es lo que permite entrar a quien se dio de alta con más de 72 bytes antes del cambio, y lo que evita un 500 en el login. Por eso `LoginRequest` **no** valida bytes. Lo fijan `test_un_hash_de_passlib_de_mas_de_72_bytes_sigue_verificando_con_la_password_entera` y `test_quien_se_dio_de_alta_con_mas_de_72_bytes_sigue_entrando`.
+- **Gotcha de tests**: `test_security.py` fabrica los tokens inválidos (caducado, manipulado, HS512, `alg: none`, otra clave) con `hmac` de la biblioteca estándar, **no** con PyJWT, para que el test no dependa de la librería que vigila. `test_auth.py` sí usa `jwt.encode` de PyJWT en dos tests; el de "otra clave" emite un `InsecureKeyLengthWarning` (clave de 30 bytes) que es esperado.
+
+## FastAPI y Starlette 1.x (AUD-004, ticket 9)
+
+`fastapi==0.141.1` y `starlette==1.7.0`, más `pytest==9.0.3` y `pytest-asyncio==1.3.0`. Starlette se fija **aparte** en `requirements.txt`: fastapi solo exige `starlette>=0.46`, sin techo, y sin ese pin cada build instalaría la última.
+
+- **Arranque y apagado, siempre con `lifespan`** (`app/main.py`). En Starlette 1.x ya no existen `on_event`, `on_startup`/`on_shutdown`, `add_event_handler`, `@app.route`, `@app.middleware` ni `@app.exception_handler`: middleware con `add_middleware` y manejadores con `exception_handlers=` o los de FastAPI.
+- **Constantes de estado con los nombres del RFC 9110**: `HTTP_422_UNPROCESSABLE_CONTENT`, `HTTP_413_CONTENT_TOO_LARGE`… Los nombres antiguos siguen existiendo pero lanzan `StarletteDeprecationWarning`.
+- **`strict_content_type` está activado** (el valor por defecto de FastAPI desde la 0.132) y se queda así: un body JSON que llega sin `Content-Type: application/json` (o un `+json`) recibe 422. Angular `HttpClient` ya la manda; si algún cliente no lo hace, se arregla en el cliente, no apagando la comprobación.
+- **La salida de las dependencias con `yield` (`get_db`) se ejecuta después de enviar la respuesta**, no antes. Los endpoints hacen `commit` antes de devolver, así que no cambia nada; no muevas un `commit` a la salida de la dependencia contando con que la respuesta lo espera.
+- **Los tests usan `httpx.AsyncClient` + `ASGITransport`**, no el `TestClient` de Starlette. En la 1.7 el `TestClient` todavía funciona con `httpx`, pero lo da por obsoleto y pide el paquete `httpx2`: no lo uses, ni añadas `httpx2`, sin decidirlo antes.
+- **pytest-asyncio 1.x ya no tiene el fixture `event_loop`.** Seguimos con `asyncio_mode = auto` y bucle por función (`pytest.ini`).
+- **pip-audit corre en el CI, informativo** (`continue-on-error`), sobre `requirements-dev.txt`, con el resultado en el resumen del job. Se instala solo en ese paso (`pip-audit==2.10.1`), no en la imagen. El `pip` de la imagen de desarrollo (25.0.1) tiene avisos y se acepta a sabiendas: va con AUD-019 / Hito 7.
 
 ## Autenticación y permisos (desde Hito 2, Funcionalidad 4)
 
@@ -83,9 +171,24 @@ Decisiones cerradas en esta funcionalidad, con el usuario, no a criterio propio 
 
 - **Sesión stateless**: access token (60 min) + refresh token (30 días), ambos JWT. **No hay tabla de sesiones ni denylist**, y se descartó añadirla: obligaría a consultar la BD en cada petición autenticada. Consecuencia asumida: `POST /auth/logout` no invalida nada en el servidor, es del lado del cliente. Hay un test (`test_logout_no_invalida_el_token`) que documenta justo eso; si algún día se añade denylist, ese test debe cambiar de expectativa.
 - **Sin registro público**: las altas las hace un admin. No añadas `POST /auth/register`.
-- **Matriz de permisos**: admin global; gestor lee y escribe solo en su empresa; usuario lee su empresa y edita solo su propio perfil (y no puede tocarse `empresa_id`/`rol_id`/`estado`, que es la escalada de privilegios más barata). Está en la tabla de `app/core/permisos.py`.
+- **Matriz de permisos**: admin global; gestor lee y escribe en su empresa; usuario lee su empresa y edita solo su propio perfil. Está en la tabla de `app/core/permisos.py`, con las reglas del recurso `usuario` desarrolladas ahí mismo. Las tres primeras cerraron la escalada que encontró la auditoría del 06/10 (AUD-001 y AUD-002) y **no se relajan sin preguntar**:
+  - **`rol_id` y `empresa_id` son solo de admin** (`CAMPOS_SOLO_ADMIN`). Un gestor que los envíe recibe 403, aunque sea su propia empresa o el valor que ya tenían: repartir roles y mover gente entre empresas es de admin. Antes, un gestor se ponía `rol_id` de admin en su propio perfil y, como el rol se relee de la BD en cada petición, el mismo token ya veía todas las empresas.
+  - **Un gestor gestiona objetivos con rol `usuario`**, más su propio perfil (`exigir_gestion_de`). Sobre un admin u otro gestor de su empresa: 403, **contraseña incluida**. Antes bastaba con compartir empresa con un admin para cambiarle la contraseña y entrar con ella.
+  - **Nadie se cambia su propio rol ni su propio estado**, admin incluido (`CAMPOS_PROPIOS_BLOQUEADOS`), ni se da de baja a sí mismo. La baja propia da **403**, no 409: lo que falla es el permiso, no un conflicto de estado.
+  - El rechazo de campos se decide **por presencia, no por valor**: un frontend que reenvíe el objeto entero con `rol_id` igual al que ya tenía también recibe 403. Es la semántica de `PATCH` y evita que el permiso dependa del estado de la fila.
+  - **El orden importa: primero el tenant, después el rol.** Un objetivo de otra empresa da 404 sin mirar su rol; un 403 ahí confirmaría que ese id existe.
+  - **Gotcha de tests**: la fixture `admin` vive en su propia empresa a propósito, y por eso este fallo no se veía. Para los tests de esta regla están `admin_de_la_empresa` y `otro_gestor`, que sí comparten empresa con el gestor.
 - **El token solo lleva `sub` (id de usuario) y `tipo`**. Nada de rol ni empresa dentro: la dependencia `usuario_actual` relee usuario y rol de la BD en cada petición, y por eso bloquear una cuenta o cambiarle el rol tiene efecto inmediato. No metas el rol en el token "para ahorrar una consulta" sin asumir que se vuelve obsoleto.
 - **Aislamiento multi-tenant**: los listados **fuerzan** el filtro a `actual.filtro_empresa` en vez de validar el `empresa_id` recibido. Es defensa en profundidad: así, olvidarse de una comprobación al añadir un endpoint no se traduce en una fuga entre clientes. Cualquier recurso nuevo con `empresa_id` (favoritos, alertas, análisis) debe seguir el mismo patrón.
+- **La baja de una empresa corta el acceso de toda su gente** (AUD-009, auditoría del 06/10). Decisión cerrada con el usuario: en un producto B2B el tenant es la unidad de facturación, y que la baja obligase a desactivar usuario por usuario era un agujero de negocio. Detalles que no son accidentales:
+  - **El criterio vive en `motivo_cuenta_no_operativa`** (`app/core/permisos.py`), una **función pura** que devuelve el motivo o `None` y **no lanza `HTTPException`**. Es así porque hay **tres puertas de entrada y no responden igual**: `usuario_actual` y el login dan 403 con el motivo, y el refresh su 401 genérico. El login y el refresh **no pasan por `usuario_actual`** (no hay token todavía, o es de otro tipo), así que ponerlo solo en la dependencia habría dejado el login abierto. Si añades una cuarta puerta, llama a esa función en vez de copiar la condición.
+  - **La empresa se mira antes que el usuario**: si el tenant está de baja, el estado de la cuenta es lo de menos.
+  - **En el login va después de `verificar_password`**, pegado a la comprobación del usuario. Comprobarlo antes devolvería el 403 sin pagar bcrypt y **reabriría la enumeración de emails que cerró AUD-010**. Lo fija `test_la_empresa_de_baja_no_cambia_el_401_de_una_password_mala`.
+  - **Es un `join`, no una consulta más**: `usuario_actual` sigue haciendo **una sola** consulta por petición (usuario + rol + estado de empresa), y por eso `test_sin_n_mas_1_con_200_alertas` no cambia su cifra.
+  - **A los usuarios no se les toca la fila**, así que reactivar la empresa devuelve el acceso sin deshacer nada. Y solo puede reactivarla **un admin de otra empresa**: los de la empresa inactiva están fuera, gestores incluidos.
+  - **El mismo criterio corta el aviso de alerta** (`app/services/notificaciones.py`): a un cliente de baja no se le siguen mandando correos. La ejecución se queda en `pendiente_envio` con el motivo, como con una cuenta bloqueada. **No prometas que el aviso sale al reactivar**: nadie barre esa cola (AUD-018). **Sus alertas sí se siguen evaluando**: excluirlas de la selección del motor es un ahorro propuesto y no decidido.
+  - **`empresa.estado` dejó de ser un campo cualquiera**: solo lo cambia un admin (`CAMPOS_EMPRESA_SOLO_ADMIN`, por presencia) y **nadie da de baja la empresa en la que vive**, ni por `PATCH` ni por `DELETE` (403). Cerrar solo el `DELETE` habría dejado la puerta grande abierta, porque el `PATCH` es `GestorDep` y `EmpresaUpdate` ya admitía `estado`. Ahí se rechaza **el valor**, no el campo: un admin puede mandar `activa` sobre su propia empresa.
+  - **La empresa del usuario de sistema nace `inactiva`** (seed de `b7f3c21a9d40`) y es correcto: no es un cliente. Hoy no rompe nada porque esa cuenta no se autentica por HTTP y `id_usuario_sistema()` la resuelve **solo por email**. Si algún día haces que un proceso automático pase por `usuario_actual`, o exiges que el usuario de sistema esté activo, esa empresa lo bloqueará.
 - **404 en vez de 403 para recursos de otro tenant**: un 403 confirmaría que ese id existe. Para roles insuficientes sobre un recurso propio sí se devuelve 403.
 
 **Arranque en frío**: crear un usuario exige token y obtener token exige usuario. Se resuelve con `docker compose exec api python -m app.cli crear-admin`. El `sistema@subvfy.es` de la migración `b7f3c21a9d40` no sirve para entrar (nace `bloqueado`, contraseña aleatoria): es solo la identidad de auditoría de los procesos automáticos.
@@ -103,6 +206,138 @@ De ahí el patrón que estrena `app/api/routes/favoritos.py` y que deben reutili
 - El `set_` del upsert solo incluye los campos **enviados y no nulos** (`exclude_unset` + descarte de `None`). Marcar un favorito desde el listado de resultados manda una ficha incompleta, y sin este filtro se machacarían con NULL los datos de una sincronización anterior. Hay un test que lo fija: `test_un_guardado_parcial_no_borra_datos_ya_cacheados`.
 - Al quitar un favorito **no se borra la convocatoria**: es compartida.
 
-Los recursos que cuelgan del usuario (favoritos) se filtran por `actual.id`, no por `filtro_empresa`. Los que cuelguen de la empresa (alertas, análisis) siguen el patrón multi-tenant de `app/core/permisos.py`. No los mezcles: son dos alcances distintos.
+Los recursos que cuelgan del usuario (favoritos, alertas) se filtran por `actual.id`, no por `filtro_empresa`. Los que cuelguen de la empresa (análisis) siguen el patrón multi-tenant de `app/core/permisos.py`. No los mezcles: son dos alcances distintos.
+
+## Alertas (desde Hito 4, Funcionalidad 1)
+
+Decisiones cerradas con el usuario:
+
+- **Personales**, como favoritos: `alerta.usuario_id` es el propietario y solo él edita o borra. Cualquier otro, admin incluido, recibe 404.
+- **Órganos y regiones son ids del catálogo BDNS** (enteros), no texto: el frontend los tiene porque consulta la BDNS. No hay catálogo propio ni normalización de texto. Si algún día hiciera falta, se expondría un `GET /catalogos/...`, que está propuesto pero no aprobado. "Normalización" aquí significa filas hijas sin duplicados (`normalizar_ids_bdns`, aplicada en los schemas).
+- En `PATCH`, las listas de filtros **reemplazan** a las anteriores. `DELETE` es **borrado físico** (se lleva el histórico de `alerta_ejecucion`); para pausar está `activa`.
+- **Capa de servicios**: las alertas estrenan `app/services/`. El router valida y traduce a HTTP, y el servicio hace el trabajo con excepciones de dominio (`AlertaNoEncontrada`, `RangoFechasInvalido`). Los routers anteriores no se han migrado a este patrón.
+
+- **Listado sin N+1**: `AlertaRead` se monta siempre con `_con_filtros(db, alertas)`, que resuelve los filtros de una página entera con **dos consultas `IN (ids)`**. El modelo `Alerta` no tiene `relationship()` a propósito, para que no haya lazy-loads en async. Una petición de listado hace un número fijo de consultas (auth + count + página + órganos + regiones), y `test_sin_n_mas_1_con_200_alertas` lo fija contando las sentencias SQL con `event.listen(engine.sync_engine, "before_cursor_execute", ...)`. No consultes las tablas hijas alerta por alerta.
+- **Orden del listado**: `created_at DESC, id DESC`. El `id` desempata las alertas creadas en la misma transacción, que comparten `created_at`; sin él, la paginación puede repetir o saltarse filas.
+
+- **Historial de ejecuciones**: cuelga de la alerta (`/alertas/{id}/ejecuciones`), no es un recurso aparte, porque una ejecución no existe sin su alerta y así la propiedad se comprueba una sola vez. El listado devuelve solo el resumen y el detalle añade las convocatorias; se ordena por `fecha_ejecucion_at DESC, id DESC`, que es lo que indexa `ix_alerta_ejecucion_alerta`. El detalle exige `alerta_id` **y** `ejecucion_id` en el mismo WHERE: pedir una ejecución desde otra alerta, aunque sea del mismo usuario, da 404.
+
+**Gotcha de teardown (ejecuciones)**: `alerta_ejecucion` y `alerta_ejecucion_convocatoria` **no** necesitan borrado explícito en `tests/conftest.py`. Caen por cascada al borrar las alertas de prueba, que ya se borran antes que los usuarios y que las convocatorias, así que ni la FK de auditoría ni `convocatoria_id` (que no tiene cascada) llegan a chocar. Si añades una tabla que referencie `convocatoria` y no cuelgue de `alerta`, sí tendrás que borrarla a mano antes que las convocatorias.
+
+**Gotcha**: si en un PATCH solo cambian filas hijas, la fila de `alerta` no queda sucia y el `onupdate` de `updated_at` no salta. Por eso el servicio lanza un `UPDATE` explícito de `updated_at`/`updated_by`, y `_leer` usa `populate_existing` para no devolver el valor viejo del identity map.
+
+**ruff y mypy** están en `requirements-dev.txt`, configurados en `pyproject.toml`: `docker compose exec api ruff check .` y `docker compose exec api mypy app`.
 
 **Gotcha de tests**: el teardown de `tests/conftest.py` tiene que poner a NULL `created_by`/`updated_by` de las convocatorias de prueba **antes** de borrar los usuarios, porque esas columnas apuntan a `usuario.id`. Si añades una tabla nueva que los procesos firmen, va en ese mismo bloque y en ese mismo orden.
+
+**Gotcha de tests (alertas)**: las alertas de prueba se borran **explícitamente antes** que los usuarios, no por la cascada. `alerta_organo`/`alerta_region` quedan a dos niveles (usuario → alerta → hija), y Postgres comprueba su FK de auditoría `created_by → usuario` antes de que la cascada llegue a borrarlas. Sin ese paso, el primer teardown falla y deja restos que tumban la limpieza de todos los tests siguientes (fueron 111 errores). Aplica a cualquier tabla nueva firmada que quede a más de un nivel de cascada del usuario. En producción no pasa, porque los usuarios solo se dan de baja lógica.
+
+## Motor de ejecución de alertas (desde Hito 4, tarea 1 de 3)
+
+Decisiones cerradas con el usuario:
+
+- **Quién toca se decide con `alerta.ultima_ejecucion_at`**, contra el intervalo de su frecuencia, en **una sola consulta** (`alertas_pendientes`). No se deriva de `alerta_ejecucion` (sería un MAX por alerta) ni se añadió columna de próxima ejecución por frecuencia (`proximo_reintento_at` existe, pero solo para la espera tras un fallo). Orden de servicio: las nunca ejecutadas primero y luego las más atrasadas.
+- **`frecuencia = "inmediata"` es intervalo cero**: toca en cada ciclo, así que su cadencia real es el intervalo del scheduler (`SCHEDULER_INTERVALO_MINUTOS`, 15 por defecto).
+- **Esta tarea solo marca `ultima_ejecucion_at`** (firmando `updated_by` con el usuario de sistema). Las filas de `alerta_ejecucion` son de la tarea 3: escribirlas aquí sería adelantarla. Sin esa marca, cada ciclo reprocesaría lo mismo.
+- **`evaluar_alerta` es el punto de extensión** y hoy no hace nada. No lanza `NotImplementedError` a propósito: dejaría todas las alertas en error, y cada una se reintentaría (con su espera creciente) y llenaría el historial de filas `error`.
+- **Aislamiento de fallos**: una alerta que revienta se registra con `logger.exception` (solo el `alerta_id`, nada del usuario), se hace `rollback` y se sigue. Su `ultima_ejecucion_at` no avanza, y se reintenta cuando acaba su espera (ver el punto siguiente). Hay un tope de `MAX_POR_CICLO` alertas por ciclo.
+- **Un fallo deja rastro y no se reintenta a ciegas**: como el rollback se lleva la fila de `alerta_ejecucion`, `registrar_fallo` (`app/services/deduplicacion_alertas.py`) escribe el error **en una transacción nueva, después del rollback**: fila `alerta_ejecucion` con `estado_envio = 'error'`, `convocatorias_encontradas = 0` y `detalle_error`, más `alerta.fallos_consecutivos` y `alerta.proximo_reintento_at` (migración `a3f9d27c51b8`). `alertas_pendientes` salta las alertas con `proximo_reintento_at` futuro. Espera creciente `ALERTAS_REINTENTO_BASE_MINUTOS × 2^(fallos-1)` (15 min, 30, 60… por defecto) con tope `ALERTAS_REINTENTO_MAX_HORAS` (24). Un éxito (`_marcar_ejecutada`) o un `PATCH` de la alerta ponen contador y espera a cero. Reglas que no son accidentales:
+  - **Un fallo nunca avanza `ultima_ejecucion_at`**: es el `desde` de la consulta a la BDNS, y avanzarlo perdería lo publicado entre el fallo y el reintento. Por eso la espera tiene sus propias columnas.
+  - **`detalle_error` no es `str(exc)`**: en un `DBAPIError` de SQLAlchemy incluye el SQL y los parámetros (datos de la BDNS), y el campo sale por `GET /alertas/{id}/ejecuciones`. `detalle_de_error` usa clase + primera línea del mensaje del driver, truncado a 500, con prefijo `[ejecución]`. El estado `error` lo reutilizará el futuro envío del aviso, y el prefijo distingue el origen.
+  - **La espera se cuenta desde el fallo, no desde el inicio del ciclo.** Con la BDNS caída cada alerta agota `BDNS_TIMEOUT_SEGUNDOS`, y un lote de `MAX_POR_CICLO` dura más que la primera espera: contada desde el inicio, la marca nacía vencida y el tick siguiente volvía a coger la alerta. Por eso el ciclo recibe un `reloj` (por defecto `datetime.now(UTC)`) y lo consulta dos veces: al empezar, para la selección y para `_marcar_ejecutada` (las que salen bien llevan todas la hora del ciclo), y en cada fallo, para `registrar_fallo`. No pases el `ahora` del ciclo a la rama del fallo. Lo fija `test_la_espera_se_cuenta_desde_el_fallo_y_no_desde_el_inicio_del_ciclo`.
+  - **Si registrar el fallo también falla, se loguea y el ciclo sigue** (`_registrar_fallo` en `motor_alertas.py`).
+  - No se desactiva la alerta (`activa`) automáticamente: es una decisión del usuario, y el error ya es visible en el historial.
+- **El servicio no sabe de APScheduler ni de FastAPI**: recibe la sesión de fuera, así que vale igual para un test, una CLI o la Lambda del Hito 7. `app/core/scheduler.py` es solo fontanería y no se despliega en producción.
+- **Desactivado por defecto** (`SCHEDULER_HABILITADO=false`): en tests y en Lambda nada debe arrancar por su cuenta. Además, `httpx`+`ASGITransport` no dispara el `lifespan`, así que la suite no lo levanta ni por accidente.
+- **Multi-worker, asumido y documentado**: con varios workers de uvicorn cada proceso arrancaría su scheduler y las alertas se evaluarían por duplicado. Hoy se corre con un worker y en Lambda + EventBridge el disparo es externo, así que se deja para el Hito 7. Si hiciera falta antes, la solución barata es envolver el ciclo en un `pg_try_advisory_lock`.
+
+**Gotcha de SQLAlchemy async — atributos expirados y `MissingGreenlet`**: en async, leer un atributo expirado es una consulta, y si se hace fuera del contexto que SQLAlchemy prepara, revienta con `MissingGreenlet`. Hay dos formas de expirar atributos sin darse cuenta, y el motor tropieza con las dos si se le quitan estas dos líneas:
+
+- **Un `UPDATE` con ORM expira los objetos que toca.** `synchronize_session` vale `"auto"` por defecto, así que la sentencia marca como expirados los atributos de las instancias ya cargadas; el siguiente `alerta.id` del bucle intenta recargar y falla. Cuando **no** se van a releer esos objetos desde la sesión, el `UPDATE` lleva `execution_options(synchronize_session=False)` (ver `_marcar_ejecutada`). Si algún día hay que releerlos, el camino es `populate_existing` en el `SELECT` posterior, no dejar que la sentencia expire medio bucle.
+- **Un `rollback()` expira la sesión entera, y eso no se desactiva por sentencia.** Por eso `alertas_pendientes` hace `db.expunge(alerta)` de cada fila antes de devolverlas: las instancias que tienen que **sobrevivir a un `rollback`** —el del aislamiento de fallos, que se ejecuta entre iteraciones— no pueden seguir atadas a la sesión. Desprenderlas es seguro aquí porque el `SELECT` carga todas las columnas y **`Alerta` no tiene `relationship()` ni columnas diferidas**; si alguien añade una relación o un `deferred`, esto deja de valer y hay que cargarlo explícitamente antes del `expunge`. Como efecto lateral bueno, sobre una instancia desprendida un atributo no cargado lanza `DetachedInstanceError` en el acto, en vez de intentar una consulta desde el sitio equivocado.
+
+**Gotcha de configuración de sesión — `expire_on_commit=False` en `app/database.py` no es decorativo**: hay código que **lee atributos después del `commit`** y depende de ello. Si alguien lo pone en `True`:
+
+- `registrar_ejecucion` (`app/services/deduplicacion_alertas.py`) devuelve el `AlertaEjecucion` que acaba de commitear, y quien lo llama lee `convocatorias_encontradas` y `estado_envio`. Con expiración al commit, esas dos lecturas pasan a ser recargas perezosas: `MissingGreenlet`.
+- Ojo, **cubre el `commit` pero no el `rollback`**: un `rollback` expira igual, con `False` o con `True`. De ahí el `expunge` del punto anterior; no busques protección en esta opción.
+- El otro lado de la misma moneda: `_leer` (`app/services/alertas.py`) usa `execution_options(populate_existing=True)` justo **porque** no hay expiración al commit, para no devolver el `updated_at` viejo que sigue en el identity map. Quien cambie esta opción tiene que revisar esos tres sitios a la vez.
+
+**Gotcha de APScheduler 3.x**: su `shutdown` va decorado con `run_in_event_loop`, así que **no apaga en el momento**, sino en la siguiente vuelta del loop. Por eso `parar_scheduler` es `async` y cede el control (`await asyncio.sleep(0)`) antes de devolver; si no, el apagado se queda a medias y `scheduler.running` sigue en `True`.
+
+**Gotcha de logs**: uvicorn solo configura sus propios loggers, así que sin `logging.basicConfig` los `INFO` de `app.*` no aparecen en `docker compose logs -f api`. Se configura una vez en el `lifespan`, con `LOG_LEVEL`.
+
+**Identidad de los procesos automáticos**: `app/services/sistema.py` resuelve el id de `sistema@subvfy.es` (seed de `b7f3c21a9d40`) y lo cachea por proceso. Sigue siendo una identidad de auditoría, no una cuenta de acceso.
+
+### La consulta a la BDNS (tarea 2 de 3)
+
+**Parámetros verificados contra la API real** (`GET {BDNS_BASE_URL}/convocatorias/busqueda`), no sacados de memoria. Si algún día cambian, se comprueban otra vez antes de tocar el código:
+
+| Nuestro criterio | Parámetro BDNS |
+|---|---|
+| `texto_busqueda` | `descripcion` |
+| `nivel_administracion` | `tipoAdministracion`: `estado`→`C`, `ccaa`→`A`, `local`→`L`, `otros`→`O` |
+| `organos` / `regiones` | `organos` / `regiones`, ids enteros **repetibles**: la API los acumula |
+| `fecha_desde` / `fecha_hasta` | `fechaDesde` / `fechaHasta` en **`dd/mm/yyyy`** (la respuesta viene en `yyyy-mm-dd`) |
+| `solo_mrr` | **no tiene parámetro**: se filtra en cliente con el campo `mrr` de cada fila |
+
+- **Una sola consulta por alerta**: al acumular varios `organos`/`regiones`, no hay producto cartesiano ni filtrado en cliente por esos criterios. Si algún día la BDNS deja de acumularlos, habrá que volver a plantearlo.
+- **El mapeo vive en un único sitio**, `NIVEL_A_TIPO_ADMINISTRACION` en `app/services/bdns_consulta.py`. No repartas equivalencias por el código.
+- **`construir_consulta` es pura**: recibe la alerta, sus filtros y la fecha `desde`, y no toca BD ni red. Por eso sus tests no necesitan Postgres.
+- **La fecha `desde` llega como parámetro**, no se calcula en el constructor. Hoy la pone `evaluar_alerta`: `ultima_ejecucion_at`, o una ventana de `BDNS_DIAS_PRIMERA_EJECUCION` días la primera vez. Si el usuario puso su propia `fecha_desde`, **gana la más restrictiva**: lo incremental no reabre un rango que él había cerrado.
+- **Criterios que no dan consulta** → `CriteriosAlertaInvalidos`: una alerta sin ningún criterio (traería la BDNS entera) o con un rango ya pasado. `solo_mrr` no cuenta como criterio. El ciclo lo registra y sigue con las demás.
+- **El cliente no reintenta** y no toca la base de datos. Los errores HTTP, de red y de timeout salen como `BdnsNoDisponible` (con `status` si lo hay). Recorre páginas hasta la última o hasta `BDNS_MAX_PAGINAS`, ordenando por `fechaRecepcion desc` para que, si se corta, se corte por lo más viejo.
+- **`httpx` es dependencia de runtime** desde esta tarea (antes solo de tests). Los tests del cliente usan `httpx.MockTransport`: mockear el servicio externo es legítimo, la base de datos sigue siendo real en el resto de la suite.
+
+**Gotcha de entorno (Avast, otra vez)**: Avast también intercepta `infosubvenciones.es`, así que desde el contenedor la consulta real falla con `CERTIFICATE_VERIFY_FAILED` y `BdnsNoDisponible`. Se arregla añadiendo `infosubvenciones.es` a las excepciones del Escudo web, igual que se hizo con `pypi.org`. **No se desactiva la verificación TLS** ni se mete un `verify=False` para salir del paso.
+
+### Deduplicación y registro (tarea 3 de 3)
+
+- **El alcance es la alerta, no el usuario**: las alertas son personales e independientes, así que la misma convocatoria puede ser novedad para dos alertas, incluso de la misma persona. `filtrar_nuevas` filtra por `alerta_id`.
+- **"Ya notificada" = existe su fila en `alerta_ejecucion_convocatoria`** para esa alerta. No hay columna `notificada`: el registro es la marca.
+- **La garantía la da Postgres, no el código**: la migración `d8c5e0cf33c8` añade `alerta_ejecucion_convocatoria.alerta_id` (desnormalizado a propósito) con `UNIQUE(alerta_id, convocatoria_id)`, y el registro usa `ON CONFLICT DO NOTHING ... RETURNING`, así que **lo devuelto es exactamente lo insertado**. Dos ciclos simultáneos no pueden contar la misma novedad dos veces, y `convocatorias_encontradas` guarda lo realmente registrado, no el tamaño del lote.
+- **Los dos UNIQUE de la tabla puente no son un despiste.** Como *constraint*, `uq_alerta_ejecucion_convocatoria (alerta_ejecucion_id, convocatoria_id)` es redundante frente a `uq_alerta_convocatoria_notificada (alerta_id, convocatoria_id)`: todas las filas de una ejecución comparten alerta, así que el segundo subsume al primero. No lo borres, por dos razones. Una, la redundancia **depende de que `alerta_id` coincida con `alerta_ejecucion.alerta_id`, y el esquema no lo obliga**: si algún código escribiera un `alerta_id` equivocado, el viejo sería la única defensa dentro de la ejecución (ver la mejora propuesta más abajo). Dos, como **índice** es el único que hay por `alerta_ejecucion_id`, y por ahí filtra el detalle del historial y busca Postgres los hijos al borrar una ejecución en cascada.
+- **Una transacción y un solo commit** en `registrar_ejecucion`: ejecución + caché + filas puente. Si algo falla a mitad, no queda nada marcado como visto; lo contrario perdería el resultado para siempre, porque en el ciclo siguiente ya no sería nuevo. El marcado de `ultima_ejecucion_at` va después, en su propio commit: si fallara ahí, el ciclo siguiente repite la consulta y la dedup devuelve cero novedades. Ese marcado va **dentro del `try`** del ciclo, como `evaluar`: su fallo deja fila `error` y aplica la espera, como cualquier otro, y no corta el lote. Consecuencia asumida: en el historial, ese intento muestra dos filas, la ejecución ya registrada y la de `error`. Lo fija `test_si_falla_el_marcado_la_alerta_deja_rastro_y_el_ciclo_sigue`.
+- **Se deduplica también dentro del lote** (`codigo_bdns`): la BDNS puede repetir un código entre páginas y el INSERT chocaría consigo mismo.
+- **`estado_envio = pendiente_envio`** cuando hay novedades: el envío del aviso es otra funcionalidad y decir `enviado` aquí sería falso. Sin novedades, `sin_novedades`. El `Literal` del OpenAPI se actualiza solo, porque importa la tupla del modelo.
+- **Upsert masivo con la regla de favoritos**: `COALESCE(excluded.campo, convocatoria.campo)` es la versión por lotes de "un guardado parcial no borra lo ya cacheado", así que la ficha completa que guardó un favorito no se pierde si la BDNS devuelve campos vacíos. El `nivel1` de la BDNS se traduce con `NIVEL_BDNS_A_NUESTRO`, derivado del mapa de `bdns_consulta.py` para no mantener dos tablas de equivalencias.
+- **Nada de respaldos en Python (`x or y`) en el upsert masivo.** Sustituir un `None` antes del INSERT deja `excluded.campo` con valor, el `COALESCE` se vuelve inútil y el respaldo machaca lo cacheado. Pasó con dos campos y se corrigió en el PR #6: `titulo or "(sin título)"` borraba el título que había guardado un favorito, y `nivel3 or nivel2` sustituía un órgano específico ya cacheado por la administración. Si añades un campo al upsert, o va sin respaldo, o queda fuera del `COALESCE` a sabiendas. La excepción consciente es `financiada_mrr`, que se sobrescribe siempre: la BDNS manda `mrr` en todas las filas y para un booleano vale lo último que diga la fuente.
+- **Una convocatoria sin `codigo_bdns` o sin título se descarta en `filtrar_nuevas`**, con `logger.warning` y antes de comparar con lo ya notificado, para que no quede marcada como vista y vuelva a entrar si la BDNS la publica completa. No es una precaución opcional: **Postgres comprueba el NOT NULL de la fila propuesta antes de resolver el `ON CONFLICT`**, así que un título nulo revienta el INSERT aunque la fila ya exista y el `COALESCE` fuera a conservar el título viejo. Para `titulo`, por tanto, ese `COALESCE` nunca actúa; lo fija `test_el_upsert_rechaza_un_titulo_nulo`.
+- **Primera ejecución**: no hay tratamiento especial más allá de la ventana `BDNS_DIAS_PRIMERA_EJECUCION` que ya aplica la consulta. **Reactivación**: al reactivar una alerta pausada, el `desde` sigue siendo su última ejecución, así que se recupera lo publicado durante la pausa; la dedup evita repetidos.
+
+**MEJORA PROPUESTA, no decidida — FK compuesta en la tabla puente**: `alerta_ejecucion_convocatoria.alerta_id` está desnormalizado y **nada garantiza que coincida** con `alerta_ejecucion.alerta_id` de su propia ejecución. Hoy la coherencia la sostiene el código (`registrar_ejecucion` es el único que escribe ahí) y los tests; un `alerta_id` incoherente dejaría el `UNIQUE(alerta_id, convocatoria_id)` apuntando a la alerta equivocada, de modo que se podría notificar dos veces lo mismo y a la vez bloquear una novedad legítima de otra alerta.
+
+- **Qué lo cerraría**: una FK compuesta `(alerta_ejecucion_id, alerta_id) → alerta_ejecucion(id, alerta_id)`. Con ella, escribir un `alerta_id` que no sea el de la ejecución pasa a ser imposible, no solo improbable.
+- **Qué exige**: un `UNIQUE(id, alerta_id)` en `alerta_ejecucion` (redundante con su PK, pero Postgres lo necesita como destino de la FK), más su migración y su `downgrade`.
+- **Por qué se aplaza**: son dos constraints nuevas y otra migración sobre una tabla que acaba de cambiar, para cubrir un fallo que hoy no puede ocurrir por ninguna vía de escritura existente. **Pendiente de aprobar**: no la implementes por iniciativa propia; si aparece un segundo sitio que escriba en esa tabla, vuelve a ponerla sobre la mesa.
+
+**Gotcha de teardown**: `alerta_ejecucion` y su tabla puente **se borran explícitamente** en `tests/conftest.py`, de dentro hacia fuera y antes que `alerta`. Por la cascada de `alerta` caerían igual —así estuvo y el recuento de restos salía a cero—, pero el borrado explícito deja el orden a la vista: **lo que no puede pasar nunca es que los usuarios se borren antes**, porque las FKs de auditoría de estas tres tablas apuntan a `usuario.id` y Postgres las comprueba antes de que la cascada anidada llegue a limpiarlas (es el bug de los 111 errores). Lo otro que importa: **las convocatorias que cree un test por esta vía deben usar `codigo_bdns_de_prueba()`**, o la limpieza no las reconoce.
+
+**Gotcha ya pagado**: añadir el `alerta_id` NOT NULL rompió dos tests anteriores que insertaban en la tabla puente sin él (`test_alerta_ejecuciones.py` y `test_alertas.py`). Si escribes en esa tabla, el `alerta_id` va siempre.
+
+
+## Notificaciones de alertas (desde Hito 4, Funcionalidad 3)
+
+Decisiones cerradas con el usuario — no las reabras sin preguntar:
+
+- **Proveedor: Amazon SES**, por coherencia con el despliegue en AWS ya decidido. `EMAIL_BACKEND` elige entre `consola` (por defecto, solo log) y `ses`. El defecto es `consola` para que ningún entorno mande correo real por descuido.
+- **Los enlaces del correo llevan a la ficha dentro de Subvfy**, no al portal de la BDNS: el aviso devuelve al usuario al producto. Las rutas son configurables (`FRONTEND_RUTA_*`) porque **no se han contrastado con el routing real del Angular** — el frontend no estaba en la máquina. Verifícalas antes de enviar nada en producción.
+- **HTML con marca + alternativa en texto plano**, siempre las dos partes.
+- **Destinatario: el dueño de la alerta** (`alerta.usuario_id`). Las alertas son personales, como los favoritos.
+
+**La costura con el motor (decidida al integrar las dos ramas)**: `enviar_aviso` **no registra nada**. Quien crea la `alerta_ejecucion`, deduplica y enlaza las convocatorias es `registrar_ejecucion` (motor, `app/services/deduplicacion_alertas.py`), que la deja en `pendiente_envio`. Este servicio recoge ese testigo, manda el correo y la cierra en `enviado` o `error`. Se llegó aquí porque las dos ramas habían escrito su propio registro de ejecución: el del motor es el bueno, porque tiene la deduplicación entre ejecuciones y el `UNIQUE` que la respalda. **No vuelvas a crear ejecuciones desde el envío.**
+
+Cuatro invariantes que sostienen los tests y conviene no romper:
+
+- **`pendiente_envio` es la cola.** `enviar_aviso` ignora cualquier ejecución en otro estado, así que llamarla dos veces sobre una ya enviada no manda un segundo correo (`test_avisar_dos_veces_no_manda_dos_correos`).
+- **Un fallo de envío no se propaga y tampoco cierra la ejecución**: se queda en `pendiente_envio` con el motivo en `detalle_error`. No se relanza porque `evaluar_alerta` llama a `enviar_aviso` dentro del ciclo y un SES caído tumbaría la pasada entera.
+- **`error` no lo escribe el envío, y esto es una decisión, no un descuido** (`test_el_estado_error_no_lo_escribe_el_envio`). Ese estado significa una sola cosa: la ejecución no llegó a término, y lo pone el motor. Usarlo también para "se ejecutó bien pero el correo no salió" daría dos significados opuestos a la misma columna: en el primer caso las convocatorias **no** se registraron y volverán a encontrarse; en el segundo **sí**, y no se volverían a anunciar nunca. Una ejecución en `pendiente_envio` con `detalle_error` nulo es que aún no se ha intentado; con texto, que se intentó y falló, y `updated_at` dice cuándo.
+- **Un fallo de envío no provoca un re-aviso duplicado.** Las convocatorias ya las registró el motor antes de intentarlo, así que no reaparecen como novedad en el ciclo siguiente (`test_un_fallo_de_envio_no_hace_que_se_re_avise`). Lo que sí puede ocurrir es reintentar **esa misma ejecución**, que sigue en la cola (`test_un_aviso_fallido_puede_reintentarse`).
+- **Una cuenta no activa deja el aviso en la cola, no en silencio.** Si alguien deja de recibir avisos por estar bloqueado tiene que verse en el historial, y el aviso debe poder salir cuando se reactive.
+
+**Pendiente, y es trabajo aparte**: **nadie barre la cola**. El ciclo llama a `enviar_aviso` con la ejecución que acaba de crear, no con las `pendiente_envio` atrasadas, así que un aviso fallido queda visible pero no se reenvía solo. El modelo de datos ya lo soporta; falta el mecanismo, y el sitio natural es el motor, junto al escalado de reintentos que introduce el PR #7.
+
+**`enviar()` es síncrono a propósito** (boto3 bloquea y no tiene versión async); el servicio lo saca del event loop con `asyncio.to_thread`. No lo envuelvas en una corrutina falsa.
+
+**Firma de auditoría**: las filas que escribe el motor llevan `created_by`/`updated_by` del usuario de sistema, vía `app/services/sistema.py`. Es justo para lo que se sembró en `b7f3c21a9d40`. Cualquier proceso automático futuro (sync BDNS, análisis IA en batch) debe usar `id_usuario_sistema()` en vez de inventarse un autor.
+
+**Pendiente de infraestructura, no de código**: verificar el dominio del remitente en SES (SPF/DKIM) y sacar la cuenta del sandbox, donde solo se puede escribir a direcciones verificadas.

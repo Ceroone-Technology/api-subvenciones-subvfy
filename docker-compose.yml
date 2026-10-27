@@ -32,6 +32,7 @@ services:
       - ./app:/app/app
       - ./alembic:/app/alembic
       - ./tests:/app/tests
+      - ./pyproject.toml:/app/pyproject.toml
 
 volumes:
   subvfy_pgdata:

@@ -6,6 +6,28 @@ API de `app-subvenciones-subvfy`: favoritos, alertas, autenticación y análisis
 
 FastAPI + SQLAlchemy 2.0 (async) + Alembic + Pydantic v2, sobre PostgreSQL (asyncpg). JWT para autenticación, APScheduler para el motor de Alertas, Anthropic SDK para Análisis con IA y Asistente IA conversacional. Las decisiones cerradas (stack, arquitectura cloud, modelo de permisos, gotchas ya resueltos) están en `CLAUDE.md`.
 
+## Flujo de ramas
+
+**No se sube a `main`.** La rama de integración es **`develop`**.
+
+- **`develop`** es donde se integra todo el trabajo. Las ramas salen de `develop` y el PR va contra `develop`.
+- **`main`** está protegida: solo recibe PRs desde `develop`, y solo con el CI en verde. No acepta push directo.
+- **CI en cada PR** (GitHub Actions, `.github/workflows/ci.yml`): migraciones, pytest, ruff y mypy contra un PostgreSQL real. Si algo falla, el PR no se puede mergear.
+
+```bash
+git fetch origin
+git checkout develop
+git pull
+git checkout -b feature/lo-que-toque
+
+# ... trabajo, commits ...
+
+git push -u origin feature/lo-que-toque
+# abrir el PR contra develop, no contra main
+```
+
+Al abrir el PR en GitHub, comprueba que el desplegable **base:** diga `develop`: por defecto propone `main`. Antes de subir, pasa en local lo mismo que el CI (ver [Tests](#tests)).
+
 ## Arranque con Docker
 
 Lo único que necesitas instalado es **Docker Desktop**. Ni Python ni PostgreSQL: ambos van dentro de los contenedores.
@@ -15,6 +37,7 @@ Lo único que necesitas instalado es **Docker Desktop**. Ni Python ni PostgreSQL
 ```bash
 git clone https://github.com/Ceroone-Technology/api-subvenciones-subvfy.git
 cd api-subvenciones-subvfy
+git checkout develop        # la rama de trabajo; main solo recibe lo ya integrado
 
 # 1. Configuración. El .env real nunca se sube: está en .gitignore.
 cp .env.example .env
@@ -41,6 +64,29 @@ Los pasos 3 y 4 solo hacen falta la primera vez: los datos viven en un volumen d
 | PostgreSQL | `localhost:5432` — usuario `subvfy`, contraseña `subvfy`, base `subvfy` |
 
 Para probar la API, lo más cómodo es **http://localhost:8000/docs**: haz `POST /auth/login` con las credenciales del admin que acabas de crear, copia el `access_token` y pégalo en el botón *Authorize* de arriba a la derecha. A partir de ahí, todas las llamadas que lances desde el Swagger llevan la cabecera puesta.
+
+### Configuración que la API valida al arrancar
+
+La API **no arranca** si la configuración no es segura, y el error dice qué variable falla:
+
+| Variable | Regla |
+|---|---|
+| `JWT_SECRET_KEY` | **Obligatoria**, mínimo 32 caracteres sin contar los espacios de los extremos. Fuera de `development` se rechazan los dos valores que están en el repositorio (el de `.env.example` y el del CI). Para generar uno: `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
+| `ENVIRONMENT` | `development` o `production`. **Sin ella vale `production`**, el modo estricto: olvidarla en un despliegue no puede dejar la API en modo permisivo. |
+| `JWT_ALGORITHM` | Solo `HS256`. |
+| `DATABASE_ECHO` | `false` por defecto, **también en development**. Con `true`, SQLAlchemy escribe en el log cada sentencia **con sus parámetros** (hashes de contraseña, emails, tokens): enciéndelo solo mientras depuras. |
+
+**Si tu `.env` es anterior a esta regla, la API ya no arranca** (el antiguo `JWT_SECRET_KEY=changeme-en-produccion` tiene 22 caracteres). Tienes dos salidas:
+
+```bash
+cp .env.example .env            # regenerarlo entero (pierdes tus ajustes locales)
+# o bien, cambiar solo esa línea del .env por la de .env.example:
+# JWT_SECRET_KEY=dev-only-inseguro-no-usar-fuera-de-desarrollo-0000
+
+docker compose up -d            # recrea el contenedor: un "restart" NO relee el .env
+```
+
+`docker compose` inyecta el `.env` como variables de entorno al **crear** el contenedor, así que tras tocarlo hace falta `up -d`, no `restart`. Lo mismo vale para `alembic`: carga la misma configuración y tampoco arranca sin `JWT_SECRET_KEY`.
 
 ### El día a día
 
@@ -99,11 +145,14 @@ alembic upgrade head          # aplica todo lo que falte (esquema + seed)
 alembic revision --autogenerate -m "descripción del cambio"   # para el siguiente cambio
 ```
 
-El esquema de `schema-subvfy.sql` ya está implementado en `app/models/` (14 tablas) y aplicado en dos migraciones:
+El esquema de `schema-subvfy.sql` ya está implementado en `app/models/` (14 tablas) y aplicado en estas migraciones:
 
 - `827c98b6a656_esquema_inicial_subvfy.py` — las 14 tablas, constraints e índices. Las FK de auditoría con dependencia circular (rol/empresa/usuario, vía `created_by`/`updated_by`) se añaden con `op.create_foreign_key()` al final de `upgrade()` — `use_alter=True` dentro de `create_table()` no genera el `ALTER TABLE` por sí solo en Alembic, hay que añadirlo explícito (y su `drop_constraint` correspondiente al inicio de `downgrade()`).
 - `0db12626fe94_seed_catalogo_de_roles.py` — siembra el catálogo de roles (`admin`, `gestor`, `usuario`).
 - `b7f3c21a9d40_seed_empresa_y_usuario_de_sistema.py` — siembra la identidad interna de auditoría para procesos automáticos.
+- `e4a19c7d2b58_indices_de_filtros_de_alerta.py` — índices por `organo_bdns_id`/`region_bdns_id` para la búsqueda inversa del motor de alertas.
+- `d8c5e0cf33c8_dedup_de_convocatorias_notificadas_por_.py` — `alerta_ejecucion_convocatoria.alerta_id` con `UNIQUE(alerta_id, convocatoria_id)` (la base de datos garantiza que una convocatoria no se notifica dos veces a la misma alerta) y el estado `pendiente_envio`.
+- `a3f9d27c51b8_reintentos_del_motor_de_alertas.py` — `alerta.fallos_consecutivos` y `alerta.proximo_reintento_at`: cuántas ejecuciones seguidas han fallado y hasta cuándo no se vuelve a intentar la alerta.
 
 Verificado con `alembic upgrade head` → `alembic downgrade base` → `alembic upgrade head` sin errores, contra un PostgreSQL real.
 
@@ -116,14 +165,17 @@ Verificado con `alembic upgrade head` → `alembic downgrade base` → `alembic 
 | Empresas | `GET /empresas`, `POST /empresas`, `GET/PATCH/DELETE /empresas/{id}` |
 | Usuarios | `GET /usuarios`, `POST /usuarios`, `GET/PATCH/DELETE /usuarios/{id}` |
 | Favoritos | `GET /favoritos`, `POST /favoritos`, `GET/PATCH/DELETE /favoritos/{codigo_bdns}` |
+| Alertas | `GET /alertas`, `POST /alertas`, `GET/PATCH/DELETE /alertas/{id}` |
+| Historial de alertas | `GET /alertas/{id}/ejecuciones`, `GET /alertas/{id}/ejecuciones/{ejecucion_id}` |
 
 Convenciones comunes a los listados y las escrituras:
 
 - **Paginación**: `?page=1&size=20` (`size` máximo 100). La respuesta es
   `{items, total, page, size}`, donde `total` cuenta las filas que cumplen el
   filtro, no las de la página.
-- **Filtros**: `q` (búsqueda por texto), más `estado` en empresas y
-  `empresa_id`/`rol_id`/`estado` en usuarios.
+- **Filtros**: `q` (búsqueda por texto), más `estado` en empresas,
+  `empresa_id`/`rol_id`/`estado` en usuarios y `organo_id`/`region_id`/`activa`
+  en alertas.
 - **PATCH parcial**: solo se aplican los campos presentes en el body.
 - **`DELETE` es baja lógica** (`estado` → `inactiva`/`inactivo`), no borrado
   físico: empresas y usuarios están referenciados por las columnas de
@@ -132,7 +184,9 @@ Convenciones comunes a los listados y las escrituras:
   único (NIF de empresa, email de usuario), 400 si se referencia una empresa o
   un rol inexistente, 422 si el body no valida.
 - La contraseña se envía en claro (`password`) y se guarda hasheada con bcrypt;
-  `password_hash` no aparece en ninguna respuesta.
+  `password_hash` no aparece en ninguna respuesta. Al crearla o cambiarla debe
+  tener entre 8 caracteres y **72 bytes en UTF-8** (el límite de bcrypt): las
+  letras con tilde y la ñ ocupan dos bytes, así que 40 «ñ» ya no caben y dan 422.
 
 ## Autenticación y permisos
 
@@ -153,12 +207,55 @@ en la llamada siguiente.
 | Rol | Alcance |
 |---|---|
 | `admin` | Global: cualquier empresa y cualquier usuario. |
-| `gestor` | Lectura y escritura solo dentro de su propia empresa. |
+| `gestor` | Lectura y escritura dentro de su propia empresa, y solo sobre usuarios con rol `usuario`. |
 | `usuario` | Lee su empresa; edita únicamente su propio perfil (sin tocar `empresa_id`, `rol_id` ni `estado`). |
 
 Quien no es admin nunca ve datos de otra empresa: los listados **fuerzan** el
 filtro a la empresa del token, y un recurso de otro tenant responde 404 (no
 403, que confirmaría su existencia).
+
+Sobre el recurso `usuario` hay tres reglas más:
+
+- **`rol_id` y `empresa_id` solo los cambia un admin.** Si los envía un gestor,
+  403, aunque sea su propia empresa o el valor que ya tenían.
+- **Un gestor gestiona solo a usuarios con rol `usuario`.** Sobre un admin u
+  otro gestor de su empresa recibe 403, también al cambiar la contraseña.
+- **Nadie se cambia su propio rol ni su propio estado, ni se da de baja a sí
+  mismo**, admin incluido: 403. Si el único admin se degradara, ya no habría
+  quien lo arreglase por la API (queda el CLI `crear-admin`).
+
+El rechazo se decide por **presencia** del campo, no por su valor: un `PATCH`
+que reenvíe `rol_id` con el mismo valor que ya tenía también responde 403, así
+que conviene mandar solo los campos que cambian.
+
+### Dar de baja una empresa
+
+`DELETE /empresas/{id}` es una baja lógica (`estado = "inactiva"`), y **corta
+el acceso de todos sus usuarios**: el tenant es la unidad de facturación, así
+que la baja de un cliente no debería obligar a desactivar a mano uno por uno.
+Qué implica, exactamente:
+
+- **Nadie de esa empresa entra ni opera.** `POST /auth/login` responde 403 con
+  `La empresa está dada de baja.`, cualquier endpoint autenticado responde lo
+  mismo —también con un token emitido antes de la baja, porque usuario y
+  empresa se releen en cada petición— y `POST /auth/refresh` responde su 401
+  genérico de siempre.
+- **A sus usuarios no se les toca nada.** Siguen `activo` en su fila, así que
+  reactivar la empresa (`PATCH /empresas/{id}` con `{"estado": "activa"}`)
+  devuelve el acceso sin deshacer nada.
+- **Dejan de salir sus avisos de alerta.** La ejecución se queda en
+  `pendiente_envio` con el motivo en `detalle_error`, visible en el historial
+  de la alerta. Ojo: hoy **nadie reenvía la cola**, así que un aviso retenido
+  no sale solo al reactivar la empresa.
+- **Sus alertas se siguen evaluando** y consultando a la BDNS: lo que se corta
+  es el correo, no el motor.
+- **El `estado` de una empresa solo lo cambia un admin** (403 para un gestor,
+  por presencia del campo), y **nadie da de baja la empresa en la que vive**,
+  ni por `PATCH` ni por `DELETE`. Mandar `activa` sobre la propia sí funciona:
+  lo que se rechaza es el valor que te deja fuera.
+
+Como consecuencia, a una empresa inactiva solo la puede reactivar **un admin
+de otra empresa**: los suyos, gestores incluidos, están fuera.
 
 ### Favoritos
 
@@ -194,6 +291,171 @@ el frontend distingue "acabo de marcarla" de "ya la tenía". Quitar un favorito
 sí es borrado físico (no tiene valor histórico), pero **la convocatoria cacheada
 se conserva**: la comparten alertas y análisis IA.
 
+### Alertas
+
+- **Son personales**, como los favoritos: solo su propietario las ve, edita o
+  borra. Para cualquier otro, admin incluido, una alerta ajena responde 404.
+- **`GET /alertas`** lista las del usuario del token, **más recientes primero**,
+  con la paginación estándar (`page`, `size`). Filtros opcionales:
+  `organo_id`/`region_id` (alertas que *incluyen* ese id BDNS) y `activa`
+  (`true` solo activas, `false` solo pausadas; sin él, todas). Cada alerta
+  trae ya sus `organos`/`regiones`, así que el listado no necesita pedir el
+  detalle de cada una.
+- **`GET /alertas/{id}`** devuelve la alerta con sus filtros, con el mismo
+  schema que el listado (`AlertaRead`). Los filtros son ids: los nombres los
+  pone el frontend con la BDNS.
+
+#### Historial de ejecuciones
+
+Cada vez que el motor de alertas evalúa una alerta deja una fila en
+`alerta_ejecucion`, con las convocatorias detectadas en
+`alerta_ejecucion_convocatoria`. Estos dos endpoints son **solo de lectura**:
+
+- **`GET /alertas/{id}/ejecuciones`**: historial paginado de esa alerta, la
+  ejecución más reciente primero (por `fecha_ejecucion_at`). Cada elemento es
+  un resumen: fecha, cuántas convocatorias se encontraron, `estado_envio`
+  (`pendiente_envio`, `enviado`, `sin_novedades` o `error`) y `detalle_error` si falló. Filtro
+  opcional `estado_envio`, para quedarse solo con los fallos.
+- **`GET /alertas/{id}/ejecuciones/{ejecucion_id}`**: el resumen más las
+  **convocatorias detectadas**, con la ficha que se guardó en la caché local.
+  Una ejecución de otra alerta, aunque sea tuya, responde 404.
+
+Lo escribe el motor de alertas en cada ciclo: `pendiente_envio` cuando hay
+novedades, `sin_novedades` cuando no y `error` cuando la ejecución falló (con el
+motivo en `detalle_error`, que empieza por `[ejecución]`). `enviado` llegará con
+la funcionalidad de notificación por correo.
+- **Órganos y regiones se filtran por id del catálogo de la BDNS**, no por
+  texto: el frontend ya tiene esos ids porque consulta la BDNS. Se guardan
+  normalizados (una fila por id en `alerta_organo`/`alerta_region`, sin
+  duplicados), y un id no válido (`0`, negativo o texto) responde 422
+  indicando el campo y el valor recibido.
+- En `PATCH`, `organos`/`regiones` **reemplazan** la lista entera (`[]` la
+  vacía; omitirlos la deja como estaba). Los campos obligatorios no admiten
+  `null`.
+- `DELETE` es **borrado físico** y se lleva el histórico de ejecuciones. Para
+  pausar una alerta sin perderlo: `PATCH` con `"activa": false`.
+
+```json
+POST /alertas
+{
+  "nombre": "Digitalización en Andalucía",
+  "texto_busqueda": "digitalización",
+  "nivel_administracion": "ccaa",
+  "frecuencia": "semanal",
+  "organos": [1500],
+  "regiones": [9]
+}
+```
+
+### Motor de alertas (job programado)
+
+Quien evalúa las alertas es un job periódico. En local lo dispara **APScheduler**
+dentro del proceso de la API; en producción (Hito 7) será EventBridge Scheduler
+invocando una Lambda, con el mismo servicio de dominio
+(`app/services/motor_alertas.py`).
+
+Cada ciclo selecciona las alertas **activas** a las que toca evaluarse —según su
+`frecuencia` y su `ultima_ejecucion_at`— y las recorre una a una. Si una falla,
+se registra en el log y se sigue con las demás. `frecuencia: "inmediata"` significa
+"en cada ciclo", así que su cadencia real es el intervalo configurado.
+
+**Una ejecución fallida deja rastro y no se reintenta a ciegas.** Se guarda una fila
+en el historial con estado `error` y el motivo (recortado, sin datos de la BDNS), y
+la alerta espera antes de volver a intentarlo: 15 minutos la primera vez, el doble
+en cada fallo seguido y 24 horas como máximo. Un éxito, o editar la alerta, borra
+la espera. Un fallo no avanza `ultima_ejecucion_at`, porque es la fecha desde la
+que se consulta la BDNS: así no se pierde lo publicado mientras la alerta fallaba.
+
+Cada ciclo **consulta la BDNS** con los criterios de la alerta (texto, nivel de
+administración, órganos, regiones y fechas), se queda **solo con lo que esa
+alerta no había visto nunca** y lo registra en su historial. Lo que **todavía no
+hace** es mandar el aviso: esas ejecuciones quedan en `pendiente_envio`.
+
+La deduplicación es **por alerta**, no por usuario: la misma convocatoria puede
+ser novedad para dos alertas distintas. Que no se repita lo garantiza la propia
+base de datos, con un `UNIQUE(alerta_id, convocatoria_id)`, así que ni dos
+ciclos a la vez cuentan dos veces la misma novedad. Si el registro falla a
+mitad, no queda nada marcado como visto y, pasada la espera, el motor lo vuelve a
+encontrar.
+
+Detalles de la consulta: los ids de órgano y región se envían repetidos en una
+sola petición (la BDNS los acumula), `solo_mrr` se filtra en cliente porque la
+API no tiene ese parámetro, y una alerta **sin ningún criterio** se rechaza en
+lugar de traer la base entera.
+
+Se configura con estas variables (ver `.env.example`):
+
+```bash
+SCHEDULER_HABILITADO=false      # desactivado por defecto: en tests no debe arrancar
+SCHEDULER_INTERVALO_MINUTOS=15
+LOG_LEVEL=INFO                  # sin esto no se ven los INFO de la app
+
+BDNS_BASE_URL=https://www.infosubvenciones.es/bdnstrans/api
+BDNS_TIMEOUT_SEGUNDOS=10
+BDNS_TAMANO_PAGINA=100          # hasta 2.000 convocatorias por alerta y ciclo
+BDNS_MAX_PAGINAS=20
+BDNS_DIAS_PRIMERA_EJECUCION=7   # ventana la primera vez que se evalúa una alerta
+
+ALERTAS_REINTENTO_BASE_MINUTOS=15   # espera tras el primer fallo; se duplica en cada uno seguido
+ALERTAS_REINTENTO_MAX_HORAS=24      # tope de esa espera
+```
+
+La BDNS es una API pública: no hace falta credencial. Si trabajas en Windows con
+Avast, añade `infosubvenciones.es` a las excepciones del Escudo web; si no, el
+contenedor no valida su certificado y toda consulta falla.
+
+Para verlo trabajar: pon `SCHEDULER_HABILITADO=true` y un intervalo corto en tu
+`.env`, reinicia con `docker compose restart api` y mira
+`docker compose logs -f api`. El primer ciclo sale al arrancar, sin esperar el
+intervalo.
+
+**Aviso de multi-worker**: con varios workers de uvicorn, cada proceso arranca su
+propio scheduler y las alertas se evaluarían por duplicado. Hoy se corre con un
+worker, y en Lambda + EventBridge el disparo es externo, así que el problema
+desaparece; si hiciera falta antes, se envolvería el ciclo en un
+`pg_try_advisory_lock`.
+
+## Notificaciones de alertas por email
+
+Cuando una ejecución de alerta encuentra convocatorias nuevas, se avisa al
+**dueño de la alerta** (las alertas son personales, como los favoritos) y se
+registra el resultado en `alerta_ejecucion`.
+
+| Variable | Para qué |
+|---|---|
+| `EMAIL_BACKEND` | `consola` (por defecto) escribe el correo en el log sin enviarlo; `ses` envía de verdad por Amazon SES. |
+| `EMAIL_REMITENTE` / `EMAIL_REMITENTE_NOMBRE` | Dirección y nombre del remitente. El dominio debe estar verificado en SES. |
+| `EMAIL_MAX_CONVOCATORIAS` | Cuántas se listan antes de cortar con un "y otras N más". |
+| `AWS_REGION` | Región de SES. |
+| `FRONTEND_BASE_URL` | Base de los enlaces del correo. |
+| `FRONTEND_RUTA_CONVOCATORIA` | Plantilla de la ruta de la ficha, con `{codigo_bdns}`. **Ajustar al routing real del Angular.** |
+| `FRONTEND_RUTA_ALERTAS` | Ruta de la pantalla de alertas (pie del correo). |
+
+El valor por defecto de `EMAIL_BACKEND` es `consola` a propósito: ningún
+entorno manda correo real sin pedirlo explícitamente.
+
+Estados que registra `alerta_ejecucion.estado_envio`:
+
+- `sin_novedades` — la alerta se evaluó y no había nada nuevo. No se envía correo.
+- `pendiente_envio` — hay novedades registradas y el aviso todavía no ha salido. Lo deja el motor, y el envío lo cierra en `enviado` cuando el correo sale. Si el envío falla, **se queda aquí** con el motivo en `detalle_error`: el aviso sigue debiendo salir.
+- `enviado` — aviso entregado al proveedor (o canal `plataforma`, donde la propia ejecución es el aviso).
+- `error` — la ejecución no llegó a término: la BDNS no respondió, o la base de datos rechazó el lote. El motivo queda en `detalle_error`.
+
+`error` y un `pendiente_envio` fallido no son lo mismo, y conviene no confundirlos al
+pintar el historial: con `error` las convocatorias **no** se registraron y volverán a
+encontrarse en la siguiente pasada; con un envío fallido **sí** se registraron, así que
+no reaparecerán como novedad y lo que falta es que salga el correo.
+
+El reparto es deliberado: el motor registra la ejecución y decide qué es novedad;
+el envío solo consume las que están en `pendiente_envio` y las cierra. Por eso
+reintentar un aviso no duplica correos, y un fallo de envío no hace que esas
+convocatorias vuelvan a salir como nuevas en el ciclo siguiente.
+
+Para producción en SES hacen falta dos cosas que no dependen del código:
+verificar el dominio del remitente (SPF y DKIM) y **sacar la cuenta del
+sandbox de SES**, porque dentro de él solo se puede escribir a direcciones
+verificadas.
+
 ### Primer administrador
 
 Crear un usuario exige estar autenticado, y autenticarse exige que ya exista
@@ -216,7 +478,11 @@ alertas, análisis IA en batch).
 
 ```bash
 docker compose exec api pytest
+docker compose exec api ruff check .
+docker compose exec api mypy app
 ```
+
+Son las mismas comprobaciones que ejecuta el CI en cada PR: si fallan aquí, el PR no se podrá mergear. El CI, la imagen de Docker y ruff/mypy usan la misma versión de Python (3.12); si se cambia, se cambian las tres a la vez.
 
 Los tests de endpoints escriben en una base de datos real (no mocks) y limpian
 sus filas al terminar; para poder distinguirlas usan NIFs con prefijo `TEST-` y
@@ -232,6 +498,7 @@ app/
   models/          # modelos SQLAlchemy (uno por tabla de schema-subvfy.sql)
   schemas/         # schemas Pydantic de request/response
   api/routes/      # un router por recurso (rol, empresa, usuario, auth, ...)
+  services/        # lógica de negocio sin HTTP (alertas, motor de alertas, identidad de sistema)
   core/            # seguridad (JWT/hash), permisos por rol, scheduler
   cli.py           # utilidades de consola (crear el primer admin)
 alembic/           # migraciones
@@ -247,4 +514,10 @@ El desarrollo se organiza como Hito → Funcionalidad → Tarea en `api-hitos-fu
 - Hito 2, Funcionalidad 3 — API de empresa/rol/usuario: **hecho** (schemas Pydantic + CRUD paginado + hashing de contraseñas).
 - Hito 2, Funcionalidad 4 — Autenticación real (JWT): **hecho** (login/refresh/logout/me, autorización por rol, aislamiento multi-tenant, 70 tests contra Postgres real).
 - Hito 3, Funcionalidad 1 — Endpoints de favoritos: **hecho** (marcar/quitar, listado con join a convocatoria, nota personal, 85 tests contra Postgres real).
-- Hito 4, Funcionalidad 1 — CRUD de alertas: **siguiente**.
+- Hito 4 — Ejecuciones fallidas de alerta visibles y con reintentos espaciados: **hecho** (fila `error` en el historial, espera creciente de 15 min a 24 h, migración `a3f9d27c51b8`; 255 tests contra Postgres real).
+- Hito 4 — Motor de ejecución de alertas (tarea 3 de 3, deduplicación y registro): **hecho** (dedup por alerta con garantía de base de datos, registro transaccional del historial y migración `d8c5e0cf33c8`; 229 tests contra Postgres real). Pendiente el envío del aviso.
+- Hito 4 — Motor de ejecución de alertas (tarea 2 de 3, consulta a la BDNS): **hecho** (constructor puro de la consulta + cliente HTTP con topes y timeouts; 219 tests contra Postgres real, el cliente con MockTransport). Pendiente el registro del historial.
+- Hito 4 — Motor de ejecución de alertas (tarea 1 de 3, job programado): **hecho** (selección por frecuencia, ciclo con aislamiento de fallos, APScheduler en el lifespan; 185 tests contra Postgres real). Pendientes la consulta a la BDNS y el registro del historial.
+- Hito 4, Funcionalidad 1 — CRUD de alertas: **hecho** (crear/editar/eliminar, filtros de órgano y región normalizados por id BDNS).
+- Hito 4 — Listado y detalle de alertas: **hecho** (paginado, filtros por órgano/región/activa, sin N+1, 142 tests contra Postgres real).
+- Hito 4 — Historial de ejecuciones por alerta: **hecho** (solo lectura; 159 tests contra Postgres real). Las ejecuciones las escribe el motor de alertas (tarea 3).

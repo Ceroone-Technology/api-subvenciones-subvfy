@@ -1,0 +1,22 @@
+# Fuera del contexto de build: secretos, historial y restos locales.
+# El Dockerfile solo copia app/, alembic/, tests/ y los archivos de config.
+.env
+.env.*
+.git
+.github
+.gitignore
+.DS_Store
+
+# Cachés y entornos virtuales
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Documentación y notas: no hacen falta en la imagen
+*.md
