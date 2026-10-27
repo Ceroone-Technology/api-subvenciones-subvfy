@@ -61,7 +61,11 @@ async def estado_sync(db: DbDep, actual: AdminDep) -> EstadoSync:
     # Un `partial` por caja de tiempo o por retiradas masivas abortadas no cuenta.
     sano = or_(
         SyncRun.estado == "ok",
-        and_(SyncRun.estado == "partial", SyncRun.error_detalle.startswith(MOTIVO_PRESUPUESTO)),
+        and_(
+            SyncRun.estado == "partial",
+            SyncRun.error_detalle.startswith(MOTIVO_PRESUPUESTO),
+            SyncRun.errores * 2 < SyncRun.detalles,  # con la mitad de detalles fallidos no hay señal de salud
+        ),
     )
     ultimo_ok = await db.scalar(select(func.max(SyncRun.finished_at)).where(sano))
     ejecuciones = (await db.scalars(select(SyncRun).order_by(SyncRun.id.desc()).limit(ULTIMAS_EJECUCIONES))).all()

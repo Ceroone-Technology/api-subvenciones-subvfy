@@ -37,6 +37,7 @@ from app.services.bdns_cliente import BdnsNoDisponible, ConvocatoriaBdns
 from app.services.bdns_mapper import DetalleInvalido, etiquetas_region, mapear_detalle, ruta_organo
 from app.services.bdns_sync_cliente import CircuitoAbierto, ClienteBdnsSync
 from app.services.catalogos import ResolvedorCatalogo, cargar_resolvedor, refrescar_catalogos
+from app.services.convocatoria_estado import ABIERTA, ABIERTA_SIN_PLAZO, PENDIENTE, estado_expr
 from app.services.deduplicacion_alertas import NIVEL_BDNS_A_NUESTRO
 from app.services.sistema import id_usuario_sistema
 
@@ -46,6 +47,8 @@ CLAVE_LOCK = "hashtext('sync_bdns')"
 LOTE_B = 500
 COMMIT_CADA = 25
 DIAS_SIN_PLAZO_RECIENTE = 90
+# Fase C refresca lo que aún puede cambiar: abiertas, pendientes y abiertas sin plazo (más las recientes sin fin).
+ESTADOS_A_REFRESCAR = (ABIERTA, PENDIENTE, ABIERTA_SIN_PLAZO)
 REFRESCO_CATALOGOS = timedelta(hours=24)
 # Campos del detalle que, si el detalle no los trae, conservan lo ya guardado (COALESCE).
 CONSERVAR = ("nivel_administracion", "administracion", "organo_convocante", "fecha_registro", "bdns_id")
@@ -306,6 +309,10 @@ async def _retirar(ctx: _Ctx) -> None:
     if ctx.indisponibles:
         logger.warning("Sync BDNS: %d retiradas aplazadas, la BDNS falló en el run.", len(pendientes))
         return
+    if run.detalles > 1 and len(pendientes) >= run.detalles:
+        ctx.parcial = True
+        ctx.motivo = f"{MOTIVO_RETIRADAS} (todos los detalles, {len(pendientes)}, dieron 404): revisar la BDNS."
+        return
     tope = max(settings.sync_max_retiradas_min, int(settings.sync_max_retiradas_pct * run.detalles))
     if len(pendientes) > tope:
         ctx.parcial = True
@@ -415,12 +422,8 @@ async def _fase_c(ctx: _Ctx, resolvedor: ResolvedorCatalogo, hoy: date, presupue
         c.detalle_sync_at.is_not(None),
         c.detalle_sync_at < ctx.run.started_at,
         or_(
-            c.fecha_fin_solicitud >= hoy,
-            c.fecha_inicio_solicitud > hoy,
-            and_(
-                c.fecha_fin_solicitud.is_(None),
-                or_(c.plazo_permanente, c.fecha_registro >= hoy - timedelta(days=DIAS_SIN_PLAZO_RECIENTE)),
-            ),
+            estado_expr(hoy).in_(ESTADOS_A_REFRESCAR),
+            and_(c.fecha_fin_solicitud.is_(None), c.fecha_registro >= hoy - timedelta(days=DIAS_SIN_PLAZO_RECIENTE)),
         ),
     )
     codigos = (

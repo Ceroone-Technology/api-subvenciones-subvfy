@@ -355,10 +355,29 @@ async def test_retiradas_en_el_umbral_exacto_se_aplican(admin: Sesion, monkeypat
     monkeypatch.setattr(settings, "sync_max_retiradas_min", 2)
     monkeypatch.setattr(settings, "sync_max_retiradas_pct", 0.0)
     bdns = FalsaBdns()
+    bdns.nueva()  # sobrevive: no todos los detalles dan 404
     dos = await _ingerir_y_retirar(bdns, admin, 2)
     run = await correr(bdns, admin)
     assert run is not None and run.estado == "ok" and run.retiradas == 2
     assert all([(await fila(c)).removed_at is not None for c in dos])
+
+
+async def test_si_todos_los_detalles_dan_404_no_se_retira_nada(admin: Sesion) -> None:
+    # Un 404 en bloque (WAF, caída parcial) no es un borrado real, aunque quede bajo el tope.
+    bdns = FalsaBdns()
+    codigos = await _ingerir_y_retirar(bdns, admin, 3)
+    run = await correr(bdns, admin)
+    assert run is not None and run.estado == "partial" and run.retiradas == 0
+    assert run.error_detalle and run.error_detalle.startswith(sync_bdns.MOTIVO_RETIRADAS)
+    assert all([(await fila(c)).removed_at is None for c in codigos])
+
+
+async def test_un_unico_detalle_404_si_se_retira(admin: Sesion) -> None:
+    bdns = FalsaBdns()
+    (codigo,) = await _ingerir_y_retirar(bdns, admin, 1)
+    run = await correr(bdns, admin)
+    assert run is not None and run.estado == "ok" and run.retiradas == 1
+    assert (await fila(codigo)).removed_at is not None
 
 
 async def test_con_la_bdns_no_disponible_no_se_retira_nada(admin: Sesion) -> None:

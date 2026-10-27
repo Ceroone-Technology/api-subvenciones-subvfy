@@ -83,12 +83,12 @@ async def test_sano_con_ok_reciente_y_no_sano_pasadas_12_horas(
     assert (await client_admin.get("/admin/sync/estado")).json()["sano"] is False
 
 
-async def _parcial(admin: Sesion, motivo: str) -> None:
+async def _parcial(admin: Sesion, motivo: str, *, detalles: int = 10, errores: int = 0) -> None:
     async with AsyncSessionLocal() as db:
         db.add(
             SyncRun(
                 modo="incremental", estado="partial", finished_at=datetime.now(UTC), error_detalle=motivo,
-                created_by=admin.id, updated_by=admin.id,
+                detalles=detalles, errores=errores, created_by=admin.id, updated_by=admin.id,
             )
         )  # fmt: skip
         await db.commit()
@@ -102,3 +102,13 @@ async def test_parcial_solo_por_presupuesto_cuenta_como_sano(admin: Sesion, clie
     await _parcial(admin, MOTIVO_PRESUPUESTO)
     cuerpo = (await client_admin.get("/admin/sync/estado")).json()
     assert cuerpo["sano"] is True and cuerpo["ultimo_ok_at"] is not None
+
+
+async def test_parcial_por_presupuesto_con_demasiados_errores_no_es_sano(
+    admin: Sesion, client_admin: AsyncClient
+) -> None:
+    # La mitad (o más) de los detalles falló: agotar el presupuesto no prueba que la BDNS respondiera.
+    await _parcial(admin, MOTIVO_PRESUPUESTO, detalles=10, errores=5)
+    assert (await client_admin.get("/admin/sync/estado")).json()["sano"] is False
+    await _parcial(admin, MOTIVO_PRESUPUESTO, detalles=10, errores=4)
+    assert (await client_admin.get("/admin/sync/estado")).json()["sano"] is True
