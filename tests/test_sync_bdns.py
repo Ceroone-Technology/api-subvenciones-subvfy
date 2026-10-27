@@ -166,7 +166,9 @@ async def test_ingesta_nuevas_con_detalle(admin: Sesion) -> None:
         assert convocatoria.fecha_fin_solicitud == date(2026, 12, 31)
         assert convocatoria.detalle_sync_at and convocatoria.disponible_at and convocatoria.contenido_hash
         assert convocatoria.created_by == admin.id
-    assert run.peticiones_bdns >= 6
+    # Listado + un detalle por código; los 5 del refresco de catálogos solo se suman si los locales tienen >24 h,
+    # y eso depende de la BD compartida (con catálogos reales recientes no se refrescan).
+    assert run.peticiones_bdns >= len(bdns.listados) + len(bdns.detalles) == 4
     # El listado se pidió ascendente (D8) y con la ventana de solape.
     assert bdns.listados[0]["direccion"] == "asc"
 

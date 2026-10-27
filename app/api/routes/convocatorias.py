@@ -12,6 +12,7 @@ from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import Field, StringConstraints
 
 from app.api.deps import DbDep, PaginacionDep
 from app.core.permisos import usuario_actual
@@ -30,17 +31,24 @@ from app.services.convocatoria_estado import EstadoConvocatoria
 router = APIRouter(prefix="/convocatorias", tags=["convocatorias"], dependencies=[Depends(usuario_actual)])
 
 MAX_TEXTO = 200
+MAX_LISTA = 50  # elementos por filtro de lista
+IdBdns = Annotated[int, Field(ge=0, le=2**31 - 1)]  # int32: fuera de rango Postgres daría 500
 
 
 def filtros_busqueda(
     q: Annotated[str | None, Query(max_length=MAX_TEXTO, description="Texto libre (sin distinguir acentos).")] = None,
     nivel: NivelAdministracion | None = None,
-    organo: Annotated[list[int] | None, Query(description="Ids BDNS de órgano; un padre incluye a sus hijos.")] = None,
+    organo: Annotated[
+        list[IdBdns] | None,
+        Query(max_length=MAX_LISTA, description="Ids BDNS de órgano; un padre incluye a sus hijos."),
+    ] = None,
     region: Annotated[
-        list[int] | None, Query(description="Ids BDNS de región; una región incluye a sus hijas.")
+        list[IdBdns] | None,
+        Query(max_length=MAX_LISTA, description="Ids BDNS de región; una región incluye a sus hijas."),
     ] = None,
     beneficiario: Annotated[
-        list[str] | None, Query(description="Tipos de beneficiario, tal cual los da el catálogo.")
+        list[Annotated[str, StringConstraints(max_length=MAX_TEXTO)]] | None,
+        Query(max_length=MAX_LISTA, description="Tipos de beneficiario, tal cual los da el catálogo."),
     ] = None,
     estado: Annotated[list[EstadoConvocatoria] | None, Query()] = None,
     registro_desde: date | None = None,
@@ -103,10 +111,8 @@ async def detalle(codigo_bdns: str, db: DbDep) -> ConvocatoriaDetalle:
         objetivos=ficha.get("objetivos", []),
         regiones=ficha.get("regiones", []),
         bases_reguladoras=ficha.get("bases_reguladoras"),
-        documentos=[
-            DocumentoConvocatoria(**doc, url=f"/convocatorias/{conv.codigo_bdns}/documentos/{doc['id']}")
-            for doc in ficha.get("documentos", [])
-        ],
+        # Sin `url` hasta que el PR de documentos añada la ruta propia: nunca se expone un host de la BDNS.
+        documentos=[DocumentoConvocatoria(**doc) for doc in ficha.get("documentos", [])],
         retirada=conv.removed_at is not None,
         ultima_actualizacion=conv.detalle_sync_at,
     )

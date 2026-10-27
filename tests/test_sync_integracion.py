@@ -104,6 +104,13 @@ async def test_parcial_solo_por_presupuesto_cuenta_como_sano(admin: Sesion, clie
     assert cuerpo["sano"] is True and cuerpo["ultimo_ok_at"] is not None
 
 
+async def test_parcial_por_presupuesto_sin_detalles_no_es_sano(admin: Sesion, client_admin: AsyncClient) -> None:
+    # Sin detalles intentados no hay señal de que la BDNS respondiera: `0 * 2 < 0` es falso.
+    await _parcial(admin, MOTIVO_PRESUPUESTO, detalles=0, errores=0)
+    cuerpo = (await client_admin.get("/admin/sync/estado")).json()
+    assert cuerpo["sano"] is False and cuerpo["ultimo_ok_at"] is None
+
+
 async def test_parcial_por_presupuesto_con_demasiados_errores_no_es_sano(
     admin: Sesion, client_admin: AsyncClient
 ) -> None:

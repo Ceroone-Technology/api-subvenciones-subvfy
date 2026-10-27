@@ -193,10 +193,24 @@ async def test_parametros_fuera_de_rango_dan_422(client_usuario: AsyncClient) ->
         assert (await client_usuario.get("/convocatorias", params=params)).status_code == 422
 
 
+@pytest.mark.parametrize("campo", ["organo", "region"])
+async def test_listas_de_ids_acotadas_dan_422_y_no_500(client_usuario: AsyncClient, campo: str) -> None:
+    for valor in ([2**31] * 1, [-1], list(range(51)), ["x"]):
+        respuesta = await client_usuario.get("/convocatorias", params={campo: valor})
+        assert respuesta.status_code == 422, (campo, valor)
+    assert (await client_usuario.get("/convocatorias", params={campo: [0, 2**31 - 1]})).status_code == 200
+
+
+async def test_lista_de_beneficiarios_acotada(client_usuario: AsyncClient) -> None:
+    assert (await client_usuario.get("/convocatorias", params={"beneficiario": ["x"] * 51})).status_code == 422
+    assert (await client_usuario.get("/convocatorias", params={"beneficiario": ["x" * 201]})).status_code == 422
+    assert (await client_usuario.get("/convocatorias", params={"beneficiario": ["x"] * 50})).status_code == 200
+
+
 # --- Detail and summary --------------------------------------------------------
 
 
-async def test_detalle_con_urls_de_documentos_propias(client_usuario: AsyncClient) -> None:
+async def test_detalle_lista_documentos_sin_url_hasta_que_exista_la_ruta(client_usuario: AsyncClient) -> None:
     m = marca()
     codigo = await sembrar(
         m,
@@ -217,12 +231,8 @@ async def test_detalle_con_urls_de_documentos_propias(client_usuario: AsyncClien
     cuerpo = (await client_usuario.get(f"/convocatorias/{codigo}")).json()
     assert cuerpo["codigo_bdns"] == codigo and cuerpo["beneficiarios"] == ["PYME"]
     assert cuerpo["instrumentos"] == ["Subvención"] and cuerpo["regiones"] == ["ES12 - ASTURIAS"]
-    assert [d["url"] for d in cuerpo["documentos"]] == [
-        f"/convocatorias/{codigo}/documentos/11",
-        f"/convocatorias/{codigo}/documentos/12",
-    ]
+    assert all("url" not in d for d in cuerpo["documentos"])  # la ruta propia llega con el PR de documentos
     assert [d["nombre"] for d in cuerpo["documentos"]] == ["bases.pdf", "anexo.pdf"]
-    assert all(d["url"].startswith("/convocatorias/") for d in cuerpo["documentos"])  # nunca un host de la BDNS
 
 
 async def test_detalle_sin_ficha_completa_y_codigo_desconocido(client_usuario: AsyncClient) -> None:

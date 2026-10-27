@@ -79,7 +79,7 @@ class ConvocatoriaResumen(BaseModel):
 
 
 class DocumentoConvocatoria(BaseModel):
-    """Documento de la ficha. `url` es siempre nuestra, nunca un host de la BDNS."""
+    """Documento de la ficha. Sin `url` hasta el PR de documentos (ruta propia, nunca un host de la BDNS)."""
 
     id: int
     nombre: str | None = None
@@ -87,7 +87,6 @@ class DocumentoConvocatoria(BaseModel):
     tamano_bytes: int | None = None
     fecha_modificacion: str | None = None
     fecha_publicacion: str | None = None
-    url: str
 
 
 class ConvocatoriaDetalle(ConvocatoriaResumen):
