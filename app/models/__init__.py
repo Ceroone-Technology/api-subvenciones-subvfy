@@ -20,6 +20,7 @@ from app.models.empresa_palabra_clave import EmpresaPalabraClave
 from app.models.favorito import Favorito
 from app.models.mensaje_asistente import MensajeAsistente
 from app.models.rol import Rol
+from app.models.sector_actividad import SectorActividad
 from app.models.sync_run import SyncRun
 from app.models.usuario import Usuario
 
@@ -40,6 +41,7 @@ __all__ = [
     "Favorito",
     "MensajeAsistente",
     "Rol",
+    "SectorActividad",
     "SyncRun",
     "Usuario",
 ]

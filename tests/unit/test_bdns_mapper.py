@@ -162,6 +162,22 @@ def test_el_hash_cambia_con_el_contenido_y_con_los_ids_resueltos() -> None:
     assert mapear_detalle(detalle_real(), region_ids=[8])["contenido_hash"] != base
 
 
+def test_las_secciones_cnae_salen_de_los_codigos_de_sectores() -> None:
+    assert mapear_detalle(detalle_real())["cnae_secciones"] == ["O"]  # sector 84.1
+    varios = detalle_real()
+    varios["sectores"] = [{"descripcion": "a", "codigo": "62.01"}, {"descripcion": "b", "codigo": "10"}]
+    assert mapear_detalle(varios)["cnae_secciones"] == ["C", "J"]
+    sin_sectores = detalle_real()
+    sin_sectores["sectores"] = []
+    assert mapear_detalle(sin_sectores)["cnae_secciones"] == []
+
+
+def test_el_hash_cambia_si_cambian_solo_las_secciones_cnae() -> None:
+    otro_codigo = detalle_real()
+    otro_codigo["sectores"][0]["codigo"] = "62.01"  # misma descripción, otra sección
+    assert mapear_detalle(otro_codigo)["contenido_hash"] != mapear_detalle(detalle_real())["contenido_hash"]
+
+
 def test_el_hash_ignora_campos_que_no_guardamos() -> None:
     ruido = detalle_real()
     ruido["anuncios"] = [{"id": 1}]

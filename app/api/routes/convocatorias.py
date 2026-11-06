@@ -15,9 +15,12 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import Field, StringConstraints
+from sqlalchemy import select
 
 from app.api.deps import DbDep, PaginacionDep, UsuarioActualDep
 from app.core.permisos import usuario_actual
+from app.models import Empresa
+from app.models.sector_actividad import CODIGO_ACTIVIDAD_OTRA
 from app.schemas.common import Pagina
 from app.schemas.convocatoria import (
     ConvocatoriaDetalle,
@@ -26,6 +29,7 @@ from app.schemas.convocatoria import (
     NivelAdministracion,
     ResumenConvocatorias,
 )
+from app.schemas.empresa import CodigoActividad
 from app.services import busqueda_convocatorias as busqueda
 from app.services import documentos as servicio_documentos
 from app.services import exportacion_convocatorias as exportacion
@@ -40,9 +44,13 @@ router = APIRouter(prefix="/convocatorias", tags=["convocatorias"], dependencies
 MAX_TEXTO = 200
 MAX_LISTA = 50  # elementos por filtro de lista
 IdBdns = Annotated[int, Field(ge=0, le=2**31 - 1)]  # int32: fuera de rango Postgres daría 500
+CABECERA_FILTRO_IGNORADO = "X-Filtro-Actividad"
 
 
-def filtros_busqueda(
+async def filtros_busqueda(
+    db: DbDep,
+    actual: UsuarioActualDep,
+    response: Response,
     q: Annotated[str | None, Query(max_length=MAX_TEXTO, description="Texto libre (sin distinguir acentos).")] = None,
     nivel: NivelAdministracion | None = None,
     organo: Annotated[
@@ -65,12 +73,28 @@ def filtros_busqueda(
     presupuesto_min: Annotated[Decimal | None, Query(ge=0)] = None,
     presupuesto_max: Annotated[Decimal | None, Query(ge=0)] = None,
     solo_mrr: bool = False,
+    actividad: Annotated[
+        CodigoActividad | None,
+        Query(description="Sección CNAE: incluye las convocatorias de esa sección y las sin sector. `OTRA` se ignora."),
+    ] = None,
+    para_mi_empresa: Annotated[
+        bool, Query(description="Usa la actividad de tu empresa. Pendiente u `OTRA`: se ignora. `actividad` prevalece.")
+    ] = False,
 ) -> FiltrosBusqueda:
+    seccion = actividad
+    if seccion is None and para_mi_empresa:
+        seccion = await db.scalar(select(Empresa.actividad_codigo).where(Empresa.id == actual.usuario.empresa_id))
+        if seccion is None:  # empresa con la actividad pendiente
+            response.headers[CABECERA_FILTRO_IGNORADO] = "ignorado"
+    if seccion == CODIGO_ACTIVIDAD_OTRA:
+        # OTRA no tiene sección CNAE que casar: se busca sin filtrar y se avisa en una cabecera.
+        response.headers[CABECERA_FILTRO_IGNORADO] = "ignorado"
+        seccion = None
     return FiltrosBusqueda(
         q=q, nivel=nivel, organo=organo or (), region=region or (), beneficiario=beneficiario or (),
         estado=estado or (), registro_desde=registro_desde, registro_hasta=registro_hasta,
         plazo_desde=plazo_desde, plazo_hasta=plazo_hasta, presupuesto_min=presupuesto_min,
-        presupuesto_max=presupuesto_max, solo_mrr=solo_mrr,
+        presupuesto_max=presupuesto_max, solo_mrr=solo_mrr, actividad=(seccion,) if seccion else (),
     )  # fmt: skip
 
 

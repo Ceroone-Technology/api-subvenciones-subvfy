@@ -25,6 +25,7 @@ from sqlalchemy import select
 from app.core.security import PASSWORD_MAX_BYTES, PASSWORD_MIN_LONGITUD, hashear_password
 from app.database import AsyncSessionLocal
 from app.models import Empresa, Rol, Usuario
+from app.services.cnae_relleno import ejecutar_relleno
 from app.services.sync_bdns import ejecutar_sync
 
 
@@ -97,6 +98,14 @@ def _sync_bdns(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def _rellenar_cnae(args: argparse.Namespace) -> None:
+    r = asyncio.run(ejecutar_relleno(limite=args.limite))
+    print(f"CNAE: {r.actualizadas} actualizadas, {r.sin_seccion} sin sección, {r.errores} errores.")
+    if r.interrumpido:
+        print("La BDNS no responde (circuito abierto): repite el comando más tarde.")
+        raise SystemExit(1)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m app.cli", description=__doc__)
     subcomandos = parser.add_subparsers(dest="comando", required=True)
@@ -117,9 +126,15 @@ def main(argv: list[str] | None = None) -> None:
     sync.add_argument("--meses", type=int, help="Meses hacia atrás del backfill (por defecto SYNC_BACKFILL_MESES).")
     sync.add_argument("--max-minutos", type=int, help="Caja de tiempo del run (por defecto SYNC_MAX_MINUTOS).")
 
+    cnae = subcomandos.add_parser("rellenar-cnae", help="Rellena las secciones CNAE de convocatorias ya cacheadas.")
+    cnae.add_argument("--limite", type=int, default=500, help="Convocatorias a procesar (1 petición cada una).")
+
     args = parser.parse_args(argv)
     if args.comando == "sync-bdns":
         _sync_bdns(args)
+        return
+    if args.comando == "rellenar-cnae":
+        _rellenar_cnae(args)
         return
     password = args.password or _pedir_password()
     if len(password) < PASSWORD_MIN_LONGITUD:

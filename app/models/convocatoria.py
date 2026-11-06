@@ -93,6 +93,11 @@ class Convocatoria(Base, AuditMixin):
     sectores: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, default=list, server_default=text("'{}'::text[]")
     )
+    # CNAE section letters derived from the BDNS sector codes (`app.services.cnae`); empty = not resolved yet
+    # or no sector declared (a grant with `sectores` but no sections is *not* open to every sector).
+    cnae_secciones: Mapped[list[str]] = mapped_column(
+        ARRAY(CHAR(1)), nullable=False, default=list, server_default=text("'{}'::char(1)[]")
+    )
     # Compact detail: documents, instruments, funds, objectives, region labels, bases text.
     detalle: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     # sha256 hex of the mapped content; an upsert is skipped when it is unchanged.
@@ -123,6 +128,7 @@ Index("ix_convocatoria_busqueda", _c.busqueda, postgresql_using="gin")
 Index("ix_convocatoria_organo_ids", _c.organo_ids, postgresql_using="gin")
 Index("ix_convocatoria_region_ids", _c.region_ids, postgresql_using="gin")
 Index("ix_convocatoria_beneficiarios", _c.beneficiarios, postgresql_using="gin")
+Index("ix_convocatoria_cnae_secciones", _c.cnae_secciones, postgresql_using="gin")
 # Rolling refresh walks the oldest `detalle_sync_at` first; never-fetched rows lead.
 Index("ix_convocatoria_refresco", _c.detalle_sync_at.asc().nulls_first())
 Index("ix_convocatoria_disponible", _c.disponible_at)

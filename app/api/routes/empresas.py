@@ -33,8 +33,15 @@ from sqlalchemy import func, or_, select
 from app.api.deps import AdminDep, DbDep, GestorDep, PaginacionDep, UsuarioActualDep
 from app.core.permisos import ESTADO_EMPRESA_ACTIVA
 from app.models import Empresa
+from app.models.sector_actividad import CODIGO_ACTIVIDAD_OTRA
 from app.schemas.common import Pagina
-from app.schemas.empresa import EmpresaCreate, EmpresaRead, EmpresaUpdate, EstadoEmpresa
+from app.schemas.empresa import (
+    MENSAJE_OTRA_SIN_TEXTO,
+    EmpresaCreate,
+    EmpresaRead,
+    EmpresaUpdate,
+    EstadoEmpresa,
+)
 
 router = APIRouter(prefix="/empresas", tags=["empresas"])
 
@@ -54,6 +61,19 @@ async def _exigir_nif_libre(db: DbDep, nif: str, excluir_id: int | None = None) 
         consulta = consulta.where(Empresa.id != excluir_id)
     if (await db.execute(consulta)).first() is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=f"Ya existe una empresa con el NIF {nif}.")
+
+
+def _resolver_actividad(empresa: Empresa, cambios: dict) -> None:
+    """Deja `cambios` con una actividad coherente (la misma regla del CHECK de la tabla).
+
+    El código efectivo es el nuevo o, si no viene, el actual. `OTRA` exige texto (el nuevo o el
+    guardado); cualquier otro código descarta el texto libre."""
+    codigo = cambios.get("actividad_codigo", empresa.actividad_codigo)
+    if codigo == CODIGO_ACTIVIDAD_OTRA:
+        if not cambios.get("actividad_otra", empresa.actividad_otra):
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=MENSAJE_OTRA_SIN_TEXTO)
+    else:
+        cambios["actividad_otra"] = None
 
 
 @router.get("", response_model=Pagina[EmpresaRead], summary="Listar empresas")
@@ -120,6 +140,8 @@ async def actualizar_empresa(
     empresa = await _obtener_o_404(db, empresa_id)
     if "nif" in cambios:
         await _exigir_nif_libre(db, cambios["nif"], excluir_id=empresa_id)
+    if "actividad_codigo" in cambios or "actividad_otra" in cambios:
+        _resolver_actividad(empresa, cambios)
     for campo, valor in cambios.items():
         setattr(empresa, campo, valor)
     empresa.updated_by = actual.id

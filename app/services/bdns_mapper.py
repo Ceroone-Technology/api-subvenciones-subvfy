@@ -27,6 +27,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from app.models import Convocatoria
+from app.services.cnae import secciones_de
 from app.services.deduplicacion_alertas import NIVEL_BDNS_A_NUESTRO
 
 logger = logging.getLogger(__name__)
@@ -115,6 +116,8 @@ def mapear_detalle(
         "region_ids": sorted(region_ids),
         "beneficiarios": _descripciones(detalle.get("tiposBeneficiarios")),
         "sectores": _descripciones(detalle.get("sectores")),
+        # Sorted letters: they enter `contenido_hash`, so a grant gets rewritten when its sections change.
+        "cnae_secciones": secciones_de(detalle.get("sectores")),
         "detalle": _detalle_compacto(detalle),
     }
     fila["contenido_hash"] = _hash(fila)

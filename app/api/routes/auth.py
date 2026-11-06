@@ -27,7 +27,8 @@ from app.core.security import (
     verificar_password,
 )
 from app.models import Empresa, Usuario
-from app.schemas.auth import LoginRequest, RefreshRequest, SesionResponse, TokenResponse
+from app.schemas.auth import LoginRequest, RefreshRequest, SesionResponse, TokenResponse, UsuarioSesionRead
+from app.schemas.empresa import EmpresaSesion
 from app.schemas.usuario import UsuarioRead
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -146,6 +147,11 @@ async def logout(actual: UsuarioActualDep) -> None:
     return None
 
 
-@router.get("/me", response_model=UsuarioRead, summary="Usuario de la sesión actual")
-async def usuario_de_la_sesion(actual: UsuarioActualDep) -> Usuario:
-    return actual.usuario
+@router.get("/me", response_model=UsuarioSesionRead, summary="Usuario de la sesión actual")
+async def usuario_de_la_sesion(actual: UsuarioActualDep, db: DbDep) -> UsuarioSesionRead:
+    # Una consulta más (por PK) a cambio de que el front sepa en el arranque si hay que pedir la actividad.
+    empresa = await db.get(Empresa, actual.usuario.empresa_id)
+    assert empresa is not None  # FK NOT NULL: un usuario siempre tiene empresa
+    return UsuarioSesionRead.model_validate(
+        {**UsuarioRead.model_validate(actual.usuario).model_dump(), "empresa": EmpresaSesion.model_validate(empresa)}
+    )

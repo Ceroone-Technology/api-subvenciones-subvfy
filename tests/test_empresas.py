@@ -17,6 +17,7 @@ async def test_crear_empresa(client_admin: AsyncClient, nif_unico: str) -> None:
         json={
             "razon_social": "Bigtoone Test SL",
             "nif": nif_unico.lower(),  # se normaliza a mayúsculas
+            "actividad_codigo": "J",
             "sector": "Tecnología",
             "tamano": "pequena",
             "ccaa": "Comunidad de Madrid",
@@ -33,7 +34,7 @@ async def test_crear_empresa(client_admin: AsyncClient, nif_unico: str) -> None:
 @pytest.mark.asyncio
 async def test_crear_empresa_nif_duplicado(client_admin: AsyncClient, empresa: dict) -> None:
     respuesta = await client_admin.post(
-        "/empresas", json={"razon_social": "Otra SL", "nif": empresa["nif"]}
+        "/empresas", json={"razon_social": "Otra SL", "nif": empresa["nif"], "actividad_codigo": "J"}
     )
     assert respuesta.status_code == 409
 
@@ -41,7 +42,8 @@ async def test_crear_empresa_nif_duplicado(client_admin: AsyncClient, empresa: d
 @pytest.mark.asyncio
 async def test_crear_empresa_tamano_invalido(client_admin: AsyncClient, nif_unico: str) -> None:
     respuesta = await client_admin.post(
-        "/empresas", json={"razon_social": "X SL", "nif": nif_unico, "tamano": "enorme"}
+        "/empresas",
+        json={"razon_social": "X SL", "nif": nif_unico, "tamano": "enorme", "actividad_codigo": "J"},
     )
     assert respuesta.status_code == 422
 
@@ -94,7 +96,7 @@ async def test_actualizar_empresa(client_admin: AsyncClient, empresa: dict) -> N
 async def test_actualizar_empresa_nif_de_otra(client_admin: AsyncClient, empresa: dict) -> None:
     otra = (
         await client_admin.post(
-            "/empresas", json={"razon_social": "Otra SL", "nif": nif_de_prueba()}
+            "/empresas", json={"razon_social": "Otra SL", "nif": nif_de_prueba(), "actividad_codigo": "J"}
         )
     ).json()
     respuesta = await client_admin.patch(f"/empresas/{otra['id']}", json={"nif": empresa["nif"]})
@@ -120,7 +122,9 @@ async def test_crear_empresa_registra_autoria(client_admin: AsyncClient, admin, 
     from app.models import Empresa
 
     creada = (
-        await client_admin.post("/empresas", json={"razon_social": "Auditada SL", "nif": nif_unico})
+        await client_admin.post(
+            "/empresas", json={"razon_social": "Auditada SL", "nif": nif_unico, "actividad_codigo": "J"}
+        )
     ).json()
 
     async with AsyncSessionLocal() as db:

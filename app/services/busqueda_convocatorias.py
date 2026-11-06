@@ -11,7 +11,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any, Literal
 
-from sqlalchemy import ColumnElement, and_, func, literal_column, select
+from sqlalchemy import ColumnElement, and_, func, literal_column, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Convocatoria, SyncRun
@@ -45,6 +45,8 @@ class FiltrosBusqueda:
     presupuesto_min: Decimal | None = None
     presupuesto_max: Decimal | None = None
     solo_mrr: bool = False
+    # CNAE section letters (`app.services.cnae`); see `condiciones` for the matching rule.
+    actividad: Sequence[str] = ()
 
 
 def _consulta_texto(q: str) -> Any:
@@ -79,6 +81,11 @@ def condiciones(f: FiltrosBusqueda) -> list[ColumnElement[bool]]:
             donde.append(columna <= maximo)
     if f.solo_mrr:
         donde.append(c.financiada_mrr.is_(True))
+    if f.actividad:
+        # Overlap with the wanted sections, or a grant that declares no sector at all (open to every sector).
+        # One that lists sectors we could not map yet (`cnae_secciones` still empty) is NOT open.
+        sin_sector = and_(func.cardinality(c.cnae_secciones) == 0, func.cardinality(c.sectores) == 0)
+        donde.append(or_(c.cnae_secciones.overlap(list(f.actividad)), sin_sector))
     return donde
 
 

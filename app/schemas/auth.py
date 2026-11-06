@@ -3,6 +3,7 @@
 from pydantic import BaseModel, EmailStr, Field
 
 from app.core.security import PASSWORD_MAX_BYTES
+from app.schemas.empresa import EmpresaSesion
 from app.schemas.usuario import UsuarioRead
 
 
@@ -33,3 +34,10 @@ class SesionResponse(TokenResponse):
     frontend pinta la sesión sin encadenar una segunda llamada a /auth/me."""
 
     usuario: UsuarioRead
+
+
+class UsuarioSesionRead(UsuarioRead):
+    """`GET /auth/me`: el usuario y el estado mínimo de su empresa, para que el front pida la
+    actividad pendiente sin una llamada más."""
+
+    empresa: EmpresaSesion
