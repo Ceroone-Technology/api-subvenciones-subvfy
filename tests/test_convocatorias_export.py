@@ -241,3 +241,11 @@ async def test_el_listado_tiene_limite_por_usuario_y_minuto(
     r = await client_usuario.get("/convocatorias", params={"size": 1})
     assert r.status_code == 429 and r.headers["retry-after"] == "60"
     assert (await client_gestor.get("/convocatorias", params={"size": 1})).status_code == 200  # other user
+
+
+def test_las_cabeceras_de_truncado_se_exponen_por_cors() -> None:
+    from app.main import app
+
+    cors = next(m for m in app.user_middleware if m.cls.__name__ == "CORSMiddleware")
+    for cabecera in ("Content-Disposition", "X-Export-Truncado", "X-Filas-Exportadas", "X-Filas-Total"):
+        assert cabecera in cors.kwargs["expose_headers"]
