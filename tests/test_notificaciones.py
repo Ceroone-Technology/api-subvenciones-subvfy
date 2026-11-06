@@ -15,10 +15,10 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.database import AsyncSessionLocal
-from app.models import Alerta, AlertaEjecucion, Convocatoria, Usuario
+from app.models import Alerta, AlertaEjecucion, AlertaEjecucionConvocatoria, Convocatoria, Usuario
 from app.services import plantillas_email
 from app.services.bdns_cliente import ConvocatoriaBdns
-from app.services.deduplicacion_alertas import registrar_ejecucion
+from app.services.deduplicacion_alertas import NIVEL_BDNS_A_NUESTRO, registrar_ejecucion
 from app.services.email import ErrorDeEnvio
 from app.services.notificaciones import (
     ESTADO_ENVIADO,
@@ -74,13 +74,40 @@ def _de_la_bdns(titulo: str = "Ayudas a la digitalización", **extra) -> Convoca
 
 
 async def _ejecutar(alerta_id: int, convocatorias: list[ConvocatoriaBdns]) -> int:
-    """Registra una ejecución como haría el motor y devuelve su id."""
+    """Registra una ejecución como haría el motor y devuelve su id.
+
+    Siembra cada ficha en la tabla local (si no estaba) y registra solo las que
+    la alerta aún no había notificado, como la selección local del motor.
+    """
     async with AsyncSessionLocal() as db:
         alerta = await db.get(Alerta, alerta_id)
         assert alerta is not None
-        ejecucion = await registrar_ejecucion(
-            db, alerta, convocatorias, usuario_sistema_id=await id_usuario_sistema(db)
-        )
+        sistema_id = await id_usuario_sistema(db)
+        ids_por_codigo: dict[str, int] = {}
+        for ficha in convocatorias:
+            local = (
+                await db.execute(select(Convocatoria).where(Convocatoria.codigo_bdns == ficha.codigo_bdns))
+            ).scalar_one_or_none()
+            if local is None:
+                local = Convocatoria(
+                    codigo_bdns=ficha.codigo_bdns,
+                    titulo=ficha.titulo,
+                    nivel_administracion=NIVEL_BDNS_A_NUESTRO.get((ficha.nivel1 or "").upper()),
+                    administracion=ficha.nivel2,
+                    organo_convocante=ficha.nivel3,
+                    created_by=sistema_id,
+                )
+                db.add(local)
+                await db.flush()
+            ya = await db.scalar(
+                select(AlertaEjecucionConvocatoria.id).where(
+                    AlertaEjecucionConvocatoria.alerta_id == alerta_id,
+                    AlertaEjecucionConvocatoria.convocatoria_id == local.id,
+                )
+            )
+            if ya is None:
+                ids_por_codigo[local.codigo_bdns] = local.id
+        ejecucion = await registrar_ejecucion(db, alerta, ids_por_codigo, usuario_sistema_id=sistema_id)
         return ejecucion.id
 
 

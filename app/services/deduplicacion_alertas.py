@@ -25,7 +25,6 @@ dejaba rastro y se reintentaba en cada ciclo.
 """
 
 import logging
-from collections.abc import Sequence
 from datetime import datetime, timedelta
 
 from sqlalchemy import func, select, update
@@ -35,27 +34,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import Alerta, AlertaEjecucion, AlertaEjecucionConvocatoria, Convocatoria
-from app.services.bdns_cliente import ConvocatoriaBdns
 from app.services.bdns_consulta import NIVEL_A_TIPO_ADMINISTRACION
+from app.services.busqueda_convocatorias import FiltrosBusqueda, condiciones
 
 logger = logging.getLogger(__name__)
 
 # Los niveles de la BDNS vienen en texto (`nivel1`) y hay que traducirlos a los
 # valores del CHECK de `convocatoria`. Se deriva del mapa de la consulta para
 # no mantener dos tablas de equivalencias.
-def _limite(columna: str) -> int:
-    """Longitud máxima de una columna de texto de `convocatoria`.
-
-    Se lee del modelo y no se escribe a mano: si mañana cambia el esquema, el
-    recorte cambia con él y no hay dos verdades.
-    """
-    tipo = Convocatoria.__table__.c[columna].type
-    longitud = getattr(tipo, "length", None)
-    if longitud is None:  # pragma: no cover - solo si alguien quita el String(n)
-        raise RuntimeError(f"La columna convocatoria.{columna} ya no tiene longitud máxima.")
-    return int(longitud)
-
-
 NIVEL_BDNS_A_NUESTRO = {
     "ESTADO": "estado",
     "AUTONOMICA": "ccaa",
@@ -65,68 +51,30 @@ NIVEL_BDNS_A_NUESTRO = {
 assert set(NIVEL_BDNS_A_NUESTRO.values()) == set(NIVEL_A_TIPO_ADMINISTRACION)
 
 
-async def filtrar_nuevas(
-    db: AsyncSession, alerta_id: int, convocatorias: Sequence[ConvocatoriaBdns]
-) -> list[ConvocatoriaBdns]:
-    """Las que esta alerta no ha notificado nunca, en una sola consulta.
+async def seleccionar_nuevas(
+    db: AsyncSession, alerta_id: int, filtros: FiltrosBusqueda, desde: datetime
+) -> dict[str, int]:
+    """Convocatorias locales que son novedad para esta alerta: `{codigo_bdns: id}`.
 
-    Antes de comparar con lo ya notificado se descarta lo que no se puede
-    cachear: sin `codigo_bdns` (o con uno que no cabe en la columna) no hay con
-    qué identificarla, y **sin título tampoco vale**, porque `convocatoria.titulo` es NOT NULL y rellenarlo con
-    un texto de relleno machacaría el título real que hubiera guardado un
-    favorito (ver el upsert de abajo). El descarte va **antes** de la
-    deduplicación a propósito: así una convocatoria descartada no queda
-    marcada como vista y vuelve a entrar si la BDNS la publica completa.
-
-    También deduplica **dentro del lote**: la BDNS puede repetir un código
-    entre páginas, y sin esto el `INSERT` chocaría consigo mismo.
+    Una sola consulta sobre la tabla local, sin tocar la BDNS: cumplen los
+    filtros compartidos de `busqueda_convocatorias`, su detalle completo llegó
+    después de `desde` (`disponible_at`, que se fija una vez) y la alerta no las
+    ha notificado nunca (NOT EXISTS sobre `alerta_ejecucion_convocatoria`).
     """
-    del_lote: dict[str, ConvocatoriaBdns] = {}
-    for convocatoria in convocatorias:
-        if not convocatoria.codigo_bdns:
-            logger.warning("BDNS: convocatoria sin código, descartada (id %s).", convocatoria.id_bdns)
-            continue
-        if len(convocatoria.codigo_bdns) > _limite("codigo_bdns"):
-            # Este no se recorta: el código es la **identidad** (clave del
-            # ON CONFLICT, y lo que usan el frontend y los favoritos para
-            # emparejar). Truncarlo inventaría una convocatoria o pisaría otra.
-            logger.warning(
-                "BDNS: código %r demasiado largo (%d caracteres), descartada.",
-                convocatoria.codigo_bdns,
-                len(convocatoria.codigo_bdns),
-            )
-            continue
-        if not (convocatoria.titulo or "").strip():
-            # Se avisa en vez de descartar en silencio: si la BDNS empieza a
-            # devolver fichas sin título, esto es lo que lo delata. Como no
-            # queda registrada, el aviso se repetirá en cada ciclo mientras
-            # siga llegando así.
-            logger.warning(
-                "BDNS: convocatoria %s sin título, descartada (no se puede cachear).",
-                convocatoria.codigo_bdns,
-            )
-            continue
-        if convocatoria.codigo_bdns not in del_lote:
-            del_lote[convocatoria.codigo_bdns] = convocatoria
-    if not del_lote:
-        return []
-
-    ya_notificadas = set(
-        await db.scalars(
-            select(Convocatoria.codigo_bdns)
-            .join(
-                AlertaEjecucionConvocatoria,
-                AlertaEjecucionConvocatoria.convocatoria_id == Convocatoria.id,
-            )
-            .where(
-                AlertaEjecucionConvocatoria.alerta_id == alerta_id,
-                Convocatoria.codigo_bdns.in_(del_lote),
-            )
+    ya_notificada = (
+        select(AlertaEjecucionConvocatoria.id)
+        .where(
+            AlertaEjecucionConvocatoria.alerta_id == alerta_id,
+            AlertaEjecucionConvocatoria.convocatoria_id == Convocatoria.id,
         )
+        .exists()
     )
-    return [
-        convocatoria for codigo, convocatoria in del_lote.items() if codigo not in ya_notificadas
-    ]
+    filas = await db.execute(
+        select(Convocatoria.codigo_bdns, Convocatoria.id)
+        .where(*condiciones(filtros), Convocatoria.disponible_at > desde, ~ya_notificada)
+        .order_by(Convocatoria.disponible_at, Convocatoria.id)
+    )
+    return {codigo: id_local for codigo, id_local in filas.all()}
 
 
 # Tope de `detalle_error`. La columna es TEXT, pero esto se sirve por la API y
@@ -228,7 +176,7 @@ async def registrar_fallo(
 async def registrar_ejecucion(
     db: AsyncSession,
     alerta: Alerta,
-    nuevas: Sequence[ConvocatoriaBdns],
+    ids_por_codigo: dict[str, int],
     *,
     usuario_sistema_id: int,
 ) -> AlertaEjecucion:
@@ -248,8 +196,7 @@ async def registrar_ejecucion(
     db.add(ejecucion)
     await db.flush()  # para tener ejecucion.id
 
-    if nuevas:
-        ids_por_codigo = await _cachear_convocatorias(db, nuevas, usuario_sistema_id)
+    if ids_por_codigo:
         registradas = await _marcar_notificadas(
             db, alerta.id, ejecucion.id, ids_por_codigo, usuario_sistema_id
         )
@@ -262,114 +209,6 @@ async def registrar_ejecucion(
 
     await db.commit()
     return ejecucion
-
-
-def _recortar(valor: str | None, limite: int, *, codigo_bdns: str | None = None, campo: str = "") -> str | None:
-    """Recorta a la longitud de la columna, y trata la cadena vacía como nula.
-
-    Lo segundo no es un descuido: `""` sobreviviría al `COALESCE` del upsert y
-    machacaría con nada un valor ya cacheado. Devolviendo `None`, se conserva.
-
-    Postgres **no recorta**: aborta la sentencia. Y como el registro va en una
-    sola transacción, ese error se llevaría por delante la fila de
-    `alerta_ejecucion` y haría fallar la ejecución entera (que el motor
-    registra y reintenta con espera, pero sin novedades mientras dure). De ahí
-    que se recorte aquí.
-    """
-    if not valor:
-        return None
-    if len(valor) > limite:
-        # Se pierde texto de la fuente: que se vea. Sale una vez por
-        # convocatoria, porque después la dedup ya la salta.
-        logger.warning(
-            "BDNS: %s de la convocatoria %s recortado de %d a %d caracteres.",
-            campo or "campo",
-            codigo_bdns,
-            len(valor),
-            limite,
-        )
-        return valor[:limite]
-    return valor
-
-
-async def _cachear_convocatorias(
-    db: AsyncSession, convocatorias: Sequence[ConvocatoriaBdns], usuario_sistema_id: int
-) -> dict[str, int]:
-    """Upsert masivo en la caché local, con el patrón de `favoritos.py`.
-
-    La regla de allí —un guardado parcial no borra lo ya cacheado— se traduce
-    al lote con `COALESCE(excluded.campo, convocatoria.campo)`: si la BDNS
-    devuelve un campo vacío, se conserva lo que hubiera (por ejemplo, la ficha
-    completa que guardó un favorito).
-
-    De ahí que aquí **no haya respaldos en Python** (`x or y`) para los campos
-    que entran en ese COALESCE: sustituir un `None` antes del INSERT deja a
-    `excluded.campo` con valor, el COALESCE se vuelve inútil y el respaldo
-    machaca el dato cacheado. Si añades un campo, o va sin respaldo, o queda
-    fuera del COALESCE a sabiendas.
-
-    `financiada_mrr` sí se sobrescribe siempre: es el único campo fuera del
-    COALESCE, porque la BDNS manda `mrr` en todas las filas y para un booleano
-    vale lo último que diga la fuente.
-
-    Y un detalle de Postgres: para `titulo`, que es NOT NULL, **el COALESCE no
-    llega a actuar nunca**. El NOT NULL se comprueba sobre la fila propuesta
-    antes de resolver el conflicto, así que un título nulo revienta el INSERT
-    aunque la fila ya exista. Quien protege la caché es el descarte de
-    `filtrar_nuevas`; el COALESCE se queda como red por coherencia con el resto
-    de campos. Lo fija `test_el_upsert_rechaza_un_titulo_nulo`.
-    """
-    filas = [
-        {
-            "codigo_bdns": convocatoria.codigo_bdns,
-            "titulo": _recortar(
-                convocatoria.titulo, _limite("titulo"), codigo_bdns=convocatoria.codigo_bdns, campo="título"
-            ),
-            # nivel_administracion no se recorta: su valor sale de nuestro mapa
-            # (estado/ccaa/local/otros) o es None, así que nunca pasa de 20.
-            "nivel_administracion": NIVEL_BDNS_A_NUESTRO.get((convocatoria.nivel1 or "").upper()),
-            "administracion": _recortar(
-                convocatoria.nivel2,
-                _limite("administracion"),
-                codigo_bdns=convocatoria.codigo_bdns,
-                campo="administración",
-            ),
-            # Sin respaldo a nivel2: si nivel3 viene vacío, lo que toca es
-            # dejar que el COALESCE conserve el órgano cacheado, que es más
-            # específico, en vez de sustituirlo por la administración.
-            "organo_convocante": _recortar(
-                convocatoria.nivel3,
-                _limite("organo_convocante"),
-                codigo_bdns=convocatoria.codigo_bdns,
-                campo="órgano convocante",
-            ),
-            "fecha_registro": convocatoria.fecha_registro,
-            # Único campo fuera del COALESCE, y a propósito: la BDNS envía
-            # `mrr` en todas las filas, así que un False no es "dato ausente"
-            # sino una corrección real que debe pisar lo cacheado. No le pongas
-            # COALESCE ni hagas anulable el campo del dataclass.
-            "financiada_mrr": convocatoria.financiada_mrr,
-            "created_by": usuario_sistema_id,
-            "updated_by": usuario_sistema_id,
-        }
-        for convocatoria in convocatorias
-    ]
-    insercion = insert_postgresql(Convocatoria).values(filas)
-    conservando = {
-        campo: func.coalesce(insercion.excluded[campo], getattr(Convocatoria, campo))
-        for campo in ("titulo", "nivel_administracion", "administracion", "organo_convocante", "fecha_registro")
-    }
-    sentencia = insercion.on_conflict_do_update(
-        index_elements=[Convocatoria.codigo_bdns],
-        set_={
-            **conservando,
-            "financiada_mrr": insercion.excluded.financiada_mrr,
-            "sincronizado_at": func.now(),
-            "updated_at": func.now(),
-            "updated_by": usuario_sistema_id,
-        },
-    ).returning(Convocatoria.id, Convocatoria.codigo_bdns)
-    return {codigo: id_local for id_local, codigo in (await db.execute(sentencia)).all()}
 
 
 async def _marcar_notificadas(

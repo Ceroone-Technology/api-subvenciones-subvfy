@@ -1,7 +1,8 @@
 """Motor de ejecución de alertas (Hito 4): ciclo, consulta a la BDNS y registro.
 
 Qué hace hoy: elegir las alertas **activas que toca evaluar** según su
-frecuencia, recorrerlas consultando la BDNS con sus criterios (tarea 2) y
+frecuencia, recorrerlas buscando en la tabla local de convocatorias (sin
+llamar a la BDNS; `bdns-local-sync` PR8) con sus criterios y
 dejar `ultima_ejecucion_at` marcada. Lo que todavía no hace, porque es de la
 tarea 3: mandar el aviso. Las novedades quedan registradas en
 `alerta_ejecucion` y su tabla puente, con `estado_envio = pendiente_envio`.
@@ -29,16 +30,16 @@ no desde el inicio del ciclo. Un éxito, o editar la alerta, reinicia la espera.
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import Alerta, AlertaOrgano, AlertaRegion
-from app.services.bdns_cliente import ClienteBdns
 from app.services.bdns_consulta import construir_consulta
-from app.services.deduplicacion_alertas import filtrar_nuevas, registrar_ejecucion, registrar_fallo
+from app.services.busqueda_convocatorias import FiltrosBusqueda
+from app.services.deduplicacion_alertas import registrar_ejecucion, registrar_fallo, seleccionar_nuevas
 from app.services.notificaciones import enviar_aviso
 
 logger = logging.getLogger(__name__)
@@ -70,28 +71,32 @@ class ResumenCiclo:
 
 
 async def evaluar_alerta(db: AsyncSession, alerta: Alerta, usuario_sistema_id: int) -> None:
-    """Consulta la BDNS con los criterios de la alerta, se queda con lo que no
-    había notificado nunca y lo registra.
+    """Busca en la tabla local las convocatorias nuevas para la alerta y las
+    registra. **No llama a la BDNS**: la sincronización ya la volcó.
 
-    Si los criterios no dan una consulta útil (`CriteriosAlertaInvalidos`) o la
-    BDNS no responde (`BdnsNoDisponible`), la excepción sube al ciclo, que la
-    registra y sigue con las demás alertas. Como el registro no se habrá
-    hecho, esos resultados volverán a salir como nuevos.
+    Si los criterios no dan una consulta útil (`CriteriosAlertaInvalidos`) la
+    excepción sube al ciclo, que la registra y sigue con las demás alertas.
     """
     organos, regiones = await filtros_de_alerta(db, alerta.id)
-    consulta = construir_consulta(alerta, organos, regiones, desde=_desde_de(alerta))
-
-    async with ClienteBdns() as cliente:
-        convocatorias = await cliente.buscar_todo(consulta)
-
-    nuevas = await filtrar_nuevas(db, alerta.id, convocatorias)
+    desde = _desde_de(alerta)
+    # Solo valida criterios (sin criterios, o rango ya pasado): el filtro real es local.
+    construir_consulta(alerta, organos, regiones, desde=desde.date())
+    filtros = FiltrosBusqueda(
+        q=alerta.texto_busqueda or None,
+        nivel=alerta.nivel_administracion,
+        organo=organos,
+        region=regiones,
+        registro_desde=alerta.fecha_desde,
+        registro_hasta=alerta.fecha_hasta,
+        solo_mrr=alerta.solo_mrr,
+    )
+    nuevas = await seleccionar_nuevas(db, alerta.id, filtros, desde)
     ejecucion = await registrar_ejecucion(db, alerta, nuevas, usuario_sistema_id=usuario_sistema_id)
 
     logger.info(
-        "Alerta %s: %d de %d convocatoria(s) son novedad (ejecución %s, estado %s).",
+        "Alerta %s: %d convocatoria(s) nueva(s) (ejecución %s, estado %s).",
         alerta.id,
         ejecucion.convocatorias_encontradas,
-        len(convocatorias),
         ejecucion.id,
         ejecucion.estado_envio,
     )
@@ -126,16 +131,16 @@ async def filtros_de_alerta(db: AsyncSession, alerta_id: int) -> tuple[list[int]
     return list(organos), list(regiones)
 
 
-def _desde_de(alerta: Alerta) -> date:
-    """Desde cuándo se pregunta a la BDNS.
+def _desde_de(alerta: Alerta) -> datetime:
+    """Desde cuándo cuenta una convocatoria como novedad (`disponible_at`).
 
     Lo normal es "desde la última vez que se evaluó". La primera vez no hay
     referencia, así que se usa una ventana corta configurable en vez de
     arrastrar el histórico entero.
     """
     if alerta.ultima_ejecucion_at is not None:
-        return alerta.ultima_ejecucion_at.date()
-    return (datetime.now(UTC) - timedelta(days=settings.bdns_dias_primera_ejecucion)).date()
+        return alerta.ultima_ejecucion_at
+    return datetime.now(UTC) - timedelta(days=settings.bdns_dias_primera_ejecucion)
 
 
 async def alertas_pendientes(
