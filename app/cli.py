@@ -27,6 +27,7 @@ from app.database import AsyncSessionLocal
 from app.models import Empresa, Rol, Usuario
 from app.services.clasificacion import ResultadoRecalculo, recalcular
 from app.services.cnae_relleno import ejecutar_relleno
+from app.services.seed_prueba import SeedRechazado, sembrar
 from app.services.sync_bdns import ejecutar_sync
 
 
@@ -119,6 +120,21 @@ def _recalcular(_: argparse.Namespace) -> None:
         print(f"  {tema}: {n}")
 
 
+async def _seed_prueba(email: str) -> list[str]:
+    async with AsyncSessionLocal() as db:
+        return (await sembrar(db, email)).lineas
+
+
+def _seed(args: argparse.Namespace) -> None:
+    try:
+        lineas = asyncio.run(_seed_prueba(args.email))
+    except SeedRechazado as exc:
+        raise SystemExit(str(exc)) from exc
+    print("seed-prueba terminado:")
+    for linea in lineas:
+        print(f"  - {linea}")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m app.cli", description=__doc__)
     subcomandos = parser.add_subparsers(dest="comando", required=True)
@@ -147,7 +163,16 @@ def main(argv: list[str] | None = None) -> None:
         help="Recalcula tema y gestiona_subvfy de todas las convocatorias (sin llamar a la BDNS).",
     )
 
+    semilla = subcomandos.add_parser(
+        "seed-prueba",
+        help="SOLO DESARROLLO: rellena la cuenta de un usuario con datos de prueba realistas (idempotente).",
+    )
+    semilla.add_argument("--email", required=True, help="Email del usuario cuya cuenta se rellena.")
+
     args = parser.parse_args(argv)
+    if args.comando == "seed-prueba":
+        _seed(args)
+        return
     if args.comando == "recalcular-clasificacion":
         _recalcular(args)
         return

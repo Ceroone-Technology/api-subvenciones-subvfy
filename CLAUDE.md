@@ -369,3 +369,5 @@ Cuatro invariantes que sostienen los tests y conviene no romper:
 **Pendiente de infraestructura, no de código**: verificar el dominio del remitente en SES (SPF/DKIM) y sacar la cuenta del sandbox, donde solo se puede escribir a direcciones verificadas.
 
 **Salida de red a permitir en AWS (Hito 7)**: la API llama a `www.cartociudad.es:443` (HTTPS, buscador `GET /direcciones/buscar`, `CARTOCIUDAD_BASE_URL`) y a `www.infosubvenciones.es:443` (BDNS). Sin esa salida el buscador responde 503 y el front cae a la entrada manual.
+
+**Datos de prueba de una cuenta (solo desarrollo)**: `docker compose exec api python -m app.cli seed-prueba --email <usuario>` rellena perfil de empresa, teléfono, ~8 favoritos con nota (terminan en `(dato de prueba)`), 3 alertas `Prueba: ...` con ejecuciones, 8 tarjetas de seguimiento con tareas y responsable, y preferencias de aviso, con convocatorias abiertas reales. Se niega a correr si `ENVIRONMENT` no es `development`, solo toca esa cuenta y su empresa, y es idempotente. No toca `actividad_*`; no pisa un teléfono ya puesto.
