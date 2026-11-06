@@ -14,11 +14,12 @@ from typing import Annotated, Any
 from fastapi import APIRouter, HTTPException, Query, status
 
 from app.api.deps import DbDep, PaginacionDep, UsuarioActualDep
-from app.schemas.alerta import AlertaCreate, AlertaRead, AlertaUpdate
+from app.schemas.alerta import AlertaCreate, AlertaRead, AlertasResumen, AlertaUpdate
 from app.schemas.alerta_ejecucion import EjecucionDetalle, EjecucionRead, EstadoEnvio
 from app.schemas.common import Pagina
 from app.services import alerta_ejecuciones as servicio_ejecuciones
 from app.services import alertas as servicio
+from app.services import alertas_resumen as servicio_resumen
 
 router = APIRouter(prefix="/alertas", tags=["alertas"])
 
@@ -65,6 +66,12 @@ async def listar_alertas(
 @router.post("", response_model=AlertaRead, status_code=status.HTTP_201_CREATED, summary="Crear alerta")
 async def crear_alerta(datos: AlertaCreate, db: DbDep, actual: UsuarioActualDep) -> AlertaRead:
     return await servicio.crear_alerta(db, datos, actual.id)
+
+
+@router.get("/resumen", response_model=AlertasResumen, summary="Resumen de mis alertas")
+async def resumen_alertas(db: DbDep, actual: UsuarioActualDep) -> AlertasResumen:
+    """Activas, novedades de la semana, alertas con la última ejecución fallida y la próxima ejecución."""
+    return await servicio_resumen.resumen(db, actual.id)
 
 
 @router.get("/{alerta_id}", response_model=AlertaRead, responses=_RESPUESTA_404, summary="Consultar una alerta")

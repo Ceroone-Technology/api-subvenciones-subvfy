@@ -15,15 +15,17 @@ el router las traduce.
 
 from collections import defaultdict
 from collections.abc import Sequence
-from datetime import date
+from datetime import UTC, date, datetime
 
 from sqlalchemy import ColumnElement, delete, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Alerta, AlertaOrgano, AlertaRegion
 from app.schemas.alerta import AlertaCreate, AlertaRead, AlertaUpdate
+from app.services.alertas_resumen import calcular_proxima_ejecucion, historiales
 
 _CAMPOS_FILTRO = ("organos", "regiones")
+_CAMPOS_DERIVADOS = (*_CAMPOS_FILTRO, "nuevas_ultima", "historial", "proxima_ejecucion_at")
 
 
 class AlertaNoEncontrada(Exception):
@@ -192,7 +194,7 @@ async def _leer(db: AsyncSession, alerta_id: int) -> AlertaRead:
 
 
 async def _con_filtros(db: AsyncSession, alertas: Sequence[Alerta]) -> list[AlertaRead]:
-    """Resuelve los filtros de varias alertas con dos consultas en total.
+    """Resuelve filtros e historial de varias alertas con tres consultas en total (órganos, regiones, ejecuciones).
 
     Es la única forma de montar un `AlertaRead`, tanto para una alerta como
     para una página entera: consultar las tablas hijas alerta por alerta
@@ -200,6 +202,8 @@ async def _con_filtros(db: AsyncSession, alertas: Sequence[Alerta]) -> list[Aler
     a propósito; así no hay lazy-loads que en async revientan.
     """
     ids = [alerta.id for alerta in alertas]
+    historial = await historiales(db, ids)
+    ahora = datetime.now(UTC)
     organos: dict[int, list[int]] = defaultdict(list)
     regiones: dict[int, list[int]] = defaultdict(list)
     if ids:
@@ -221,9 +225,12 @@ async def _con_filtros(db: AsyncSession, alertas: Sequence[Alerta]) -> list[Aler
 
     return [
         AlertaRead(
-            **{campo: getattr(alerta, campo) for campo in AlertaRead.model_fields if campo not in _CAMPOS_FILTRO},
+            **{campo: getattr(alerta, campo) for campo in AlertaRead.model_fields if campo not in _CAMPOS_DERIVADOS},
             organos=organos[alerta.id],
             regiones=regiones[alerta.id],
+            nuevas_ultima=historial[alerta.id][0].convocatorias_encontradas if historial[alerta.id] else 0,
+            historial=historial[alerta.id],
+            proxima_ejecucion_at=calcular_proxima_ejecucion(alerta, ahora),
         )
         for alerta in alertas
     ]

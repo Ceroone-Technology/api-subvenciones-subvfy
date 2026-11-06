@@ -13,6 +13,7 @@ from typing import Annotated, Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.alerta import CANALES_NOTIFICACION, FRECUENCIAS_VALIDAS, NIVELES_ADMINISTRACION
+from app.schemas.alerta_ejecucion import EjecucionRead
 from app.services.filtros import normalizar_ids_bdns
 
 # Literal[tupla] funciona en runtime pero mypy no lo acepta (ver CLAUDE.md): de ahí los ignore.
@@ -121,3 +122,20 @@ class AlertaRead(BaseModel):
     ultima_ejecucion_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    # Derivadas del historial (plan N8): sin consultas por alerta, ver `_con_filtros`.
+    nuevas_ultima: int = 0
+    historial: list[EjecucionRead] = Field(default_factory=list)
+    proxima_ejecucion_at: datetime | None = None
+
+
+class AlertasResumen(BaseModel):
+    """The four figures above the alerts list (plan N8), over the user's own alerts."""
+
+    activas: int
+    total: int
+    # Convocatorias found by all runs of the last 7 days.
+    novedades_semana: int
+    # Active alerts whose latest run failed.
+    requieren_atencion: int
+    # Earliest `proxima_ejecucion_at` among the active alerts; null when none is active.
+    proxima_ejecucion_at: datetime | None

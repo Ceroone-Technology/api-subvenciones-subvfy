@@ -26,8 +26,16 @@ from app.api.deps import DbDep, PaginacionDep, UsuarioActualDep
 from app.core.permisos import UsuarioAutenticado
 from app.models import Convocatoria, Favorito
 from app.schemas.common import Pagina
-from app.schemas.convocatoria import ConvocatoriaUpsert
-from app.schemas.favorito import FavoritoCreate, FavoritoRead, FavoritoUpdate
+from app.schemas.convocatoria import ConvocatoriaRead, ConvocatoriaUpsert
+from app.schemas.favorito import (
+    ConvocatoriaFavorita,
+    FavoritoCreate,
+    FavoritoRead,
+    FavoritosResumen,
+    FavoritoUpdate,
+    PorPlazo,
+)
+from app.services.convocatoria_estado import estado_expr, hoy_madrid
 
 router = APIRouter(prefix="/favoritos", tags=["favoritos"])
 
@@ -79,21 +87,74 @@ async def _obtener_favorito_o_404(
     return favorito
 
 
-async def _leer(db: DbDep, favorito_id: int) -> FavoritoRead:
-    """Relee el favorito con su convocatoria para devolverlo resuelto."""
-    favorito, convocatoria = (
-        await db.execute(
-            select(Favorito, Convocatoria)
-            .join(Convocatoria, Convocatoria.id == Favorito.convocatoria_id)
-            .where(Favorito.id == favorito_id)
-        )
-    ).one()
+_ESTADO = estado_expr().label("estado")
+_DIAS = (Convocatoria.fecha_fin_solicitud - hoy_madrid()).label("dias_restantes")
+
+
+def _a_read(favorito: Favorito, convocatoria: Convocatoria, estado: str, dias: int | None) -> FavoritoRead:
+    ficha = ConvocatoriaRead.model_validate(convocatoria).model_dump()
+    ficha |= {
+        "fecha_inicio_solicitud": convocatoria.fecha_inicio_solicitud,
+        "fecha_fin_solicitud": convocatoria.fecha_fin_solicitud,
+        "estado": estado,
+        "plazo_permanente": convocatoria.plazo_permanente,
+        "presupuesto_total": convocatoria.presupuesto_total,
+        "tema": convocatoria.tema,
+        "gestiona_subvfy": convocatoria.gestiona_subvfy,
+        "dias_restantes": dias,
+    }
     return FavoritoRead(
         id=favorito.id,
         nota=favorito.nota,
         created_at=favorito.created_at,
         updated_at=favorito.updated_at,
-        convocatoria=convocatoria,
+        convocatoria=ConvocatoriaFavorita.model_validate(ficha),
+    )
+
+
+async def _leer(db: DbDep, favorito_id: int) -> FavoritoRead:
+    """Relee el favorito con su convocatoria para devolverlo resuelto."""
+    favorito, convocatoria, estado, dias = (
+        await db.execute(
+            select(Favorito, Convocatoria, _ESTADO, _DIAS)
+            .join(Convocatoria, Convocatoria.id == Favorito.convocatoria_id)
+            .where(Favorito.id == favorito_id)
+            .execution_options(populate_existing=True)
+        )
+    ).one()
+    return _a_read(favorito, convocatoria, estado, dias)
+
+
+@router.get("/resumen", response_model=FavoritosResumen, summary="Resumen de mis favoritos")
+async def resumen_favoritos(db: DbDep, actual: UsuarioActualDep) -> FavoritosResumen:
+    """Guardadas, importe sumado y barra por plazo, en una sola consulta (las cifras de la cabecera de Favoritos)."""
+    dias = Convocatoria.fecha_fin_solicitud - hoy_madrid()
+    fila = (
+        await db.execute(
+            select(
+                func.count(),
+                func.coalesce(func.sum(Convocatoria.presupuesto_total), 0),
+                func.count().filter(dias.between(0, 14)),
+                func.count().filter(func.coalesce(func.btrim(Favorito.nota), "") != ""),
+                func.count().filter(dias < 0),
+                func.count().filter(dias.between(0, 7)),
+                func.count().filter(dias.between(8, 30)),
+                func.count().filter(dias > 30),
+                func.count().filter(Convocatoria.fecha_fin_solicitud.is_(None)),
+            )
+            .select_from(Favorito)
+            .join(Convocatoria, Convocatoria.id == Favorito.convocatoria_id)
+            .where(Favorito.usuario_id == actual.id)
+        )
+    ).one()
+    return FavoritosResumen(
+        total=fila[0],
+        importe_total=float(fila[1]),
+        cierran_en_14_dias=fila[2],
+        con_nota=fila[3],
+        por_plazo=PorPlazo(
+            vencidas=fila[4], hasta_7_dias=fila[5], de_8_a_30_dias=fila[6], mas_de_30_dias=fila[7], sin_fecha=fila[8]
+        ),
     )
 
 
@@ -103,6 +164,10 @@ async def listar_favoritos(
     paginacion: PaginacionDep,
     actual: UsuarioActualDep,
     q: str | None = Query(default=None, description="Busca en el título y el código BDNS."),
+    cierran_en_dias: int | None = Query(
+        default=None, ge=0, le=365, description="Solo las que cierran de hoy a dentro de N días (inclusive)."
+    ),
+    con_nota: bool | None = Query(default=None, description="`true`: solo con nota. `false`: solo sin nota."),
 ) -> Pagina[FavoritoRead]:
     filtros = [Favorito.usuario_id == actual.id]
     if q:
@@ -110,8 +175,12 @@ async def listar_favoritos(
         filtros.append(
             or_(Convocatoria.titulo.ilike(patron), Convocatoria.codigo_bdns.ilike(patron))
         )
+    if cierran_en_dias is not None:
+        filtros.append((Convocatoria.fecha_fin_solicitud - hoy_madrid()).between(0, cierran_en_dias))
+    if con_nota is not None:
+        hay_nota = func.coalesce(func.btrim(Favorito.nota), "") != ""
+        filtros.append(hay_nota if con_nota else ~hay_nota)
 
-    base = select(Favorito).join(Convocatoria, Convocatoria.id == Favorito.convocatoria_id).where(*filtros)
     total = await db.scalar(
         select(func.count())
         .select_from(Favorito)
@@ -120,7 +189,9 @@ async def listar_favoritos(
     )
     filas = (
         await db.execute(
-            base.add_columns(Convocatoria)
+            select(Favorito, Convocatoria, _ESTADO, _DIAS)
+            .join(Convocatoria, Convocatoria.id == Favorito.convocatoria_id)
+            .where(*filtros)
             # Lo último marcado, primero: es el orden con el que se usa una
             # lista de favoritos.
             .order_by(Favorito.created_at.desc(), Favorito.id.desc())
@@ -130,16 +201,7 @@ async def listar_favoritos(
     ).all()
 
     return Pagina[FavoritoRead](
-        items=[
-            FavoritoRead(
-                id=favorito.id,
-                nota=favorito.nota,
-                created_at=favorito.created_at,
-                updated_at=favorito.updated_at,
-                convocatoria=convocatoria,
-            )
-            for favorito, convocatoria in filas
-        ],
+        items=[_a_read(favorito, convocatoria, estado, dias) for favorito, convocatoria, estado, dias in filas],
         total=total or 0,
         page=paginacion.page,
         size=paginacion.size,

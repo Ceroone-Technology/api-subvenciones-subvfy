@@ -210,7 +210,7 @@ async def test_sin_n_mas_1_con_200_alertas(client_gestor: AsyncClient, gestor: S
     assert len(grande.json()["items"]) == 100
     assert all(i["organos"] == [42, 1500] and i["regiones"] == [9] for i in grande.json()["items"])
     # auth + count + página + órganos + regiones, sea cual sea el tamaño.
-    assert len(cien) == len(una) <= 5, cien
+    assert len(cien) == len(una) <= 6, cien
 
 
 # --- Detalle ------------------------------------------------------------
