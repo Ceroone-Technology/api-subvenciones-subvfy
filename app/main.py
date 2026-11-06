@@ -22,6 +22,7 @@ from app.api.routes import (
     empresas,
     favoritos,
     roles,
+    seguimiento,
     usuarios,
 )
 from app.config import settings
@@ -69,6 +70,7 @@ app.include_router(roles.router)
 app.include_router(empresas.router)
 app.include_router(usuarios.router)
 app.include_router(favoritos.router)
+app.include_router(seguimiento.router)
 app.include_router(alertas.router)
 app.include_router(admin_sync.router)
 app.include_router(admin_documentos.router)

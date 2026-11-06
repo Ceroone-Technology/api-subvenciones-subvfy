@@ -41,6 +41,7 @@ from app.models import (
     EmpresaInteres,
     GestionExcepcion,
     Rol,
+    Seguimiento,
     SyncRun,
     Usuario,
 )
@@ -249,6 +250,13 @@ async def limpiar_datos_de_test() -> AsyncGenerator[None, None]:
                 EmpresaInteres.empresa_id.in_(select(Empresa.id).where(Empresa.nif.like(f"{NIF_PREFIJO_TEST}%")))
                 | EmpresaInteres.created_by.in_(usuarios_firmantes)
                 | EmpresaInteres.updated_by.in_(usuarios_firmantes)
+            )
+        )
+        # Tarjetas de seguimiento de empresas de prueba (sus tareas y eventos caen en cascada), antes que los usuarios
+        # que las firmaron (FK de auditoría).
+        await db.execute(
+            delete(Seguimiento).where(
+                Seguimiento.empresa_id.in_(select(Empresa.id).where(Empresa.nif.like(f"{NIF_PREFIJO_TEST}%")))
             )
         )
         # Las alertas no pueden esperar a la cascada del usuario: sus filtros

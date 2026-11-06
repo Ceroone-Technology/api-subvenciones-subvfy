@@ -23,6 +23,7 @@ from app.models.interes import EmpresaInteres, Interes
 from app.models.mensaje_asistente import MensajeAsistente
 from app.models.rol import Rol
 from app.models.sector_actividad import SectorActividad
+from app.models.seguimiento import Seguimiento, SeguimientoEvento, SeguimientoTarea
 from app.models.sync_run import SyncRun
 from app.models.usuario import Usuario
 
@@ -47,6 +48,9 @@ __all__ = [
     "MensajeAsistente",
     "Rol",
     "SectorActividad",
+    "Seguimiento",
+    "SeguimientoEvento",
+    "SeguimientoTarea",
     "SyncRun",
     "Usuario",
 ]
