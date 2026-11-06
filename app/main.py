@@ -71,7 +71,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
     # Sin esto el navegador oculta el nombre de archivo de las descargas (export y documentos).
-    expose_headers=["Content-Disposition"],
+    expose_headers=["Content-Disposition", "X-Filas-Exportadas", "X-Filas-Total", "X-Export-Truncado"],
 )
 
 # Va a `ServerErrorMiddleware`, por fuera del CORS: el manejador añade él mismo las cabeceras.

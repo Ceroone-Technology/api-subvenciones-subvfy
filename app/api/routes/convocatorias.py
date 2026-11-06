@@ -19,6 +19,8 @@ from pydantic import Field, StringConstraints
 from sqlalchemy import select
 
 from app.api.deps import DbDep, PaginacionDep, UsuarioActualDep
+from app.config import settings
+from app.core.limite_intentos import LimiteIntentos
 from app.core.permisos import ROL_ADMIN, ROL_GESTOR, exigir_roles, usuario_actual
 from app.models import Empresa
 from app.models.convocatoria import TEMAS
@@ -56,6 +58,20 @@ CABECERA_FILTRO_IGNORADO = "X-Filtro-Actividad"
 # The listing also sorts by affinity (needs the company of the session); the export keeps the SQL-only orders.
 ORDENES_LISTADO = (*busqueda.ORDENES, "afinidad")
 OrdenListado = Literal[ORDENES_LISTADO]  # type: ignore[valid-type]
+
+
+# Per-user, per-minute cap on the list (anti-scraping page by page). In memory, so per process; generous on purpose.
+limite_listado = LimiteIntentos(maximo=settings.listado_max_por_minuto, ventana=60)
+
+
+async def limitar_listado(actual: UsuarioActualDep) -> None:
+    if limite_listado.bloqueado(actual.id):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Demasiadas consultas seguidas. Espera un minuto antes de seguir.",
+            headers={"Retry-After": "60"},
+        )
+    limite_listado.registrar_fallo(actual.id)
 
 
 async def filtros_busqueda(
@@ -120,7 +136,13 @@ async def filtros_busqueda(
 FiltrosDep = Annotated[FiltrosBusqueda, Depends(filtros_busqueda)]
 
 
-@router.get("", response_model=Pagina[ConvocatoriaResumen], summary="Buscar convocatorias")
+@router.get(
+    "",
+    response_model=Pagina[ConvocatoriaResumen],
+    summary="Buscar convocatorias",
+    dependencies=[Depends(limitar_listado)],
+    responses={429: {"description": "Demasiadas consultas por minuto."}},
+)
 async def listar(
     db: DbDep,
     actual: UsuarioActualDep,
@@ -180,21 +202,49 @@ async def estadisticas(db: DbDep, dias: Annotated[int, Query(description="7, 30 
     return await servicio_estadisticas.estadisticas(db, dias)
 
 
-@router.get("/export", summary="Exportar el resultado filtrado a CSV o XLSX")
+@router.get(
+    "/export",
+    summary="Exportar el resultado filtrado a CSV o XLSX",
+    responses={429: {"description": "Máximo de exportaciones diarias alcanzado."}},
+)
 async def exportar(
     db: DbDep,
+    actual: UsuarioActualDep,
     filtros: FiltrosDep,
     formato: FormatoExportacion,
     orden: Annotated[OrdenConvocatorias, Query()] = "recientes",
 ) -> Response:
-    """Mismos filtros que el listado, tope de 5.000 filas, sin llamar a la BDNS."""
-    datos = await exportacion.filas(db, filtros, orden)
+    """Mismos filtros que el listado. Tope de filas por fichero y de exportaciones por usuario y día (`Settings`);
+    cada exportación queda registrada. Las cabeceras `X-Filas-Exportadas`, `X-Filas-Total` y `X-Export-Truncado`
+    dicen si el tope recortó el resultado. Nunca llama a la BDNS."""
+    try:
+        await exportacion.comprobar_cupo(db, actual.id)
+    except exportacion.ExportacionesAgotadas as agotado:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Has alcanzado el máximo de {agotado.maximo} exportaciones al día. Vuelve a intentarlo mañana.",
+        ) from None
+    datos = await exportacion.consultar(db, filtros, orden)
     if formato == "csv":
-        contenido, tipo = exportacion.a_csv(datos), exportacion.MIME_CSV
+        contenido, tipo = exportacion.a_csv(datos.para_csv()), exportacion.MIME_CSV
     else:
-        contenido, tipo = exportacion.a_xlsx(datos), exportacion.MIME_XLSX
+        contenido = exportacion.a_xlsx(datos.crudas, filtros=filtros, total=datos.total)
+        tipo = exportacion.MIME_XLSX
+    await exportacion.registrar(
+        db, usuario_id=actual.id, empresa_id=actual.empresa_id, formato=formato, filtros=filtros,
+        filas=len(datos.crudas),
+    )  # fmt: skip
     nombre = f"convocatorias-{datetime.now(UTC):%Y%m%d}.{formato}"
-    return Response(contenido, media_type=tipo, headers={"Content-Disposition": f'attachment; filename="{nombre}"'})
+    return Response(
+        contenido,
+        media_type=tipo,
+        headers={
+            "Content-Disposition": f'attachment; filename="{nombre}"',
+            "X-Filas-Exportadas": str(len(datos.crudas)),
+            "X-Filas-Total": str(datos.total),
+            "X-Export-Truncado": "true" if datos.truncada else "false",
+        },
+    )
 
 
 @router.get("/{codigo_bdns}", response_model=ConvocatoriaDetalle, summary="Ficha de una convocatoria")

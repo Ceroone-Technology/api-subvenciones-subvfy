@@ -40,6 +40,7 @@ from app.models import (
     DocumentoAcceso,
     Empresa,
     EmpresaInteres,
+    ExportacionLog,
     GestionExcepcion,
     Rol,
     Seguimiento,
@@ -282,6 +283,12 @@ async def limpiar_datos_de_test() -> AsyncGenerator[None, None]:
         )
         await db.execute(delete(AlertaEjecucion).where(AlertaEjecucion.alerta_id.in_(alertas_de_test)))
         await db.execute(delete(Alerta).where(Alerta.usuario_id.in_(usuarios_de_test)))
+        # Registro de exportaciones de usuarios de prueba (FK de auditoría hacia usuario): antes que los usuarios.
+        await db.execute(
+            delete(ExportacionLog).where(
+                ExportacionLog.usuario_id.in_(usuarios_de_test) | ExportacionLog.created_by.in_(usuarios_de_test)
+            )
+        )
         # Usuarios primero (sus favoritos caen por ON DELETE CASCADE), luego
         # las convocatorias cacheadas y por ultimo las empresas.
         await db.execute(delete(Usuario).where(Usuario.email.like(f"%{EMAIL_DOMINIO_TEST}")))

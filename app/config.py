@@ -109,6 +109,12 @@ class Settings(BaseSettings):
     sync_max_retiradas_min: int = 50
     sync_max_retiradas_pct: float = 0.05
     sync_backfill_meses: int = 24
+    # Abuse limits of the grants list (a PO concern: someone copying our data source). Exports: rows per file and
+    # files per user per day (counted from `exportacion_log`, so it holds across processes). The list endpoint is
+    # also limited per user and per minute (in memory, per process).
+    export_max_filas: int = 5000
+    export_max_diarias_usuario: int = 20
+    listado_max_por_minuto: int = 120
 
     # Caché de documentos de la BDNS. `s3` queda reservado al Hito 7.
     documentos_backend: str = "local"

@@ -19,6 +19,7 @@ from app.models.descarte import Descarte
 from app.models.documento_acceso import DocumentoAcceso
 from app.models.empresa import Empresa
 from app.models.empresa_palabra_clave import EmpresaPalabraClave
+from app.models.exportacion_log import ExportacionLog
 from app.models.favorito import Favorito
 from app.models.gestion_excepcion import GestionExcepcion
 from app.models.interes import EmpresaInteres, Interes
@@ -42,6 +43,7 @@ __all__ = [
     "ConvocatoriaDocumento",
     "AdminLecturaCliente",
     "Descarte",
+    "ExportacionLog",
     "DocumentoAcceso",
     "ConversacionAsistente",
     "Empresa",
