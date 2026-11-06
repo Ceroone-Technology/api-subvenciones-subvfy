@@ -27,6 +27,7 @@ from app.database import AsyncSessionLocal
 from app.models import Empresa, Rol, Usuario
 from app.services.clasificacion import ResultadoRecalculo, recalcular
 from app.services.cnae_relleno import ejecutar_relleno
+from app.services.cuentas_prueba import CuentasRechazadas, Resultado, crear_cuentas
 from app.services.seed_prueba import SeedRechazado, sembrar
 from app.services.sync_bdns import ejecutar_sync
 
@@ -135,6 +136,22 @@ def _seed(args: argparse.Namespace) -> None:
         print(f"  - {linea}")
 
 
+async def _crear_cuentas_prueba(email: str) -> Resultado:
+    async with AsyncSessionLocal() as db:
+        return await crear_cuentas(db, email)
+
+
+def _cuentas_prueba(args: argparse.Namespace) -> None:
+    try:
+        r = asyncio.run(_crear_cuentas_prueba(args.email))
+    except CuentasRechazadas as exc:
+        raise SystemExit(str(exc)) from exc
+    print(f"crear-cuentas-prueba terminado (empresa {r.empresa}, {r.tarjetas_asignadas} tarjeta(s) del usuario):")
+    print("Las contraseñas se muestran solo ahora; repite el comando para generar otras.")
+    for c in r.cuentas:
+        print(f"  {c.rol}: {c.email}  contraseña: {c.password}  ({'creada' if c.creada else 'reiniciada'})")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m app.cli", description=__doc__)
     subcomandos = parser.add_subparsers(dest="comando", required=True)
@@ -169,7 +186,16 @@ def main(argv: list[str] | None = None) -> None:
     )
     semilla.add_argument("--email", required=True, help="Email del usuario cuya cuenta se rellena.")
 
+    cuentas = subcomandos.add_parser(
+        "crear-cuentas-prueba",
+        help="SOLO DESARROLLO: crea un gestor y un usuario de prueba en la empresa de un usuario (idempotente).",
+    )
+    cuentas.add_argument("--email", default="santiago.marin@ceroone.com", help="Usuario cuya empresa se usa.")
+
     args = parser.parse_args(argv)
+    if args.comando == "crear-cuentas-prueba":
+        _cuentas_prueba(args)
+        return
     if args.comando == "seed-prueba":
         _seed(args)
         return
