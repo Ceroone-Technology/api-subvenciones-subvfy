@@ -121,6 +121,9 @@ class Settings(BaseSettings):
     # con tope. Sin esto, una alerta rota se reintentaría en cada ciclo.
     alertas_reintento_base_minutos: int = 15
     alertas_reintento_max_horas: int = 24
+    # Margen hacia atrás de la selección de novedades: `disponible_at` lo pone el sync al escribir y puede
+    # confirmarse después del ciclo; debe cubrir un sync entero (`sync_max_minutos`). La deduplicación evita repetir.
+    alertas_solape_minutos: int = 30
 
     # CORS — orígenes permitidos, separados por coma
     cors_origins: str = "http://localhost:4200"

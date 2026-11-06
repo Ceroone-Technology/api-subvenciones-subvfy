@@ -1,6 +1,8 @@
 """Document storage abstraction (PR10, task 10.4)."""
 
 import hashlib
+import os
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -77,3 +79,18 @@ def test_obtener_almacen_local_y_s3(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     s3 = Settings(_env_file=None, documentos_backend="s3")  # type: ignore[call-arg]
     with pytest.raises(ConfiguracionAlmacenInvalida):
         obtener_almacen(s3)
+
+
+async def test_guardar_barre_los_temporales_viejos_y_respeta_los_recientes(tmp_path: Path) -> None:
+    tmp_dir = tmp_path / "tmp"
+    tmp_dir.mkdir()
+    viejo, reciente = tmp_dir / "viejo", tmp_dir / "reciente"
+    viejo.write_bytes(b"x")
+    reciente.write_bytes(b"y")
+    hace_un_dia = time.time() - 86_400
+    os.utime(viejo, (hace_un_dia, hace_un_dia))
+
+    await AlmacenLocal(tmp_path).guardar(_trozos(b"abc"), max_bytes=100)
+
+    assert not viejo.exists()  # a crash left it behind
+    assert reciente.exists()  # could be an upload in flight

@@ -3,8 +3,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
 
-# CNAE-2009 sections A-U plus `OTRA` (free text). The migration seeds exactly these, in this order.
-SECCIONES_CNAE = tuple("ABCDEFGHIJKLMNOPQRSTU")
+# CNAE-2025 sections A-V (22) plus `OTRA` (free text). The migration seeds exactly these, in this order.
+SECCIONES_CNAE = tuple("ABCDEFGHIJKLMNOPQRSTUV")
 CODIGO_ACTIVIDAD_OTRA = "OTRA"
 CODIGOS_ACTIVIDAD = (*SECCIONES_CNAE, CODIGO_ACTIVIDAD_OTRA)
 

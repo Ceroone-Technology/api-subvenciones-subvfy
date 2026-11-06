@@ -1,8 +1,8 @@
 """CNAE helpers (`empresa-actividad-ia`, PR B2). **Pure functions**: no database, no network.
 
 A grant carries BDNS sector codes (`{"descripcion": ..., "codigo": "84.1"}`). The picker of a
-company offers CNAE sections (A-U), so a code is mapped to its section through the division
-(first two digits). The table mirrors the seed of `sector_actividad` (migration `a7d2e9c41b36`)
+company offers CNAE-2025 sections (A-V), so a code is mapped to its section through the division
+(first two digits). The table mirrors the catalog `sector_actividad` (migration `c9a4f6e1d283`, CNAE-2025)
 and `tests/unit/test_cnae.py` checks both agree: change them together.
 """
 
@@ -12,12 +12,12 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# section -> (first division, last division), CNAE-2009.
+# section -> (first division, last division), CNAE-2025 (INE; the BDNS `/actividades` lists these 22 sections).
 RANGOS_DIVISION: dict[str, tuple[int, int]] = {
     "A": (1, 3), "B": (5, 9), "C": (10, 33), "D": (35, 35), "E": (36, 39), "F": (41, 43),
-    "G": (45, 47), "H": (49, 53), "I": (55, 56), "J": (58, 63), "K": (64, 66), "L": (68, 68),
-    "M": (69, 75), "N": (77, 82), "O": (84, 84), "P": (85, 85), "Q": (86, 88), "R": (90, 93),
-    "S": (94, 96), "T": (97, 98), "U": (99, 99),
+    "G": (45, 47), "H": (49, 53), "I": (55, 56), "J": (58, 60), "K": (61, 63), "L": (64, 66),
+    "M": (68, 68), "N": (69, 75), "O": (77, 82), "P": (84, 84), "Q": (85, 85), "R": (86, 88),
+    "S": (90, 93), "T": (94, 96), "U": (97, 98), "V": (99, 99),
 }  # fmt: skip
 
 # "84.1", "1.1", "62" (division before the dot or alone) | "8411", "620" (no separator: first two digits).

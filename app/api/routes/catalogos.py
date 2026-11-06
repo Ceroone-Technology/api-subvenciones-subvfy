@@ -29,7 +29,7 @@ async def regiones(db: DbDep) -> list[NodoCatalogo]:
 
 @router.get("/actividades", response_model=list[SectorActividadRead], summary="Actividades de empresa (CNAE)")
 async def actividades(db: DbDep) -> list[SectorActividad]:
-    """Las 21 secciones CNAE-2009 más `OTRA`, en el orden en que se muestran."""
+    """Las 22 secciones CNAE-2025 (las de la BDNS) más `OTRA`, en el orden en que se muestran."""
     return list((await db.execute(select(SectorActividad).order_by(SectorActividad.orden))).scalars())
 
 

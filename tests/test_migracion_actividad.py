@@ -17,12 +17,12 @@ from tests.migraciones import base_temporal
 
 REVISION_ANTERIOR = "f1b8d3a67c24"
 
-# CNAE-2009 sections with their division ranges (INE).
+# CNAE-2025 sections with their division ranges (INE), the catalog at head.
 SECCIONES = {
     "A": (1, 3), "B": (5, 9), "C": (10, 33), "D": (35, 35), "E": (36, 39), "F": (41, 43),
-    "G": (45, 47), "H": (49, 53), "I": (55, 56), "J": (58, 63), "K": (64, 66), "L": (68, 68),
-    "M": (69, 75), "N": (77, 82), "O": (84, 84), "P": (85, 85), "Q": (86, 88), "R": (90, 93),
-    "S": (94, 96), "T": (97, 98), "U": (99, 99),
+    "G": (45, 47), "H": (49, 53), "I": (55, 56), "J": (58, 60), "K": (61, 63), "L": (64, 66),
+    "M": (68, 68), "N": (69, 75), "O": (77, 82), "P": (84, 84), "Q": (85, 85), "R": (86, 88),
+    "S": (90, 93), "T": (94, 96), "U": (97, 98), "V": (99, 99),
 }  # fmt: skip
 
 
@@ -31,9 +31,9 @@ async def _filas(sql: str, **params) -> list[dict]:
         return [dict(f) for f in (await db.execute(text(sql), params)).mappings().all()]
 
 
-def test_codes_are_the_21_sections_plus_otra() -> None:
+def test_codes_are_the_22_sections_plus_otra() -> None:
     assert CODIGOS_ACTIVIDAD == (*SECCIONES, "OTRA")
-    assert len(CODIGOS_ACTIVIDAD) == 22
+    assert len(CODIGOS_ACTIVIDAD) == 23
 
 
 async def test_catalog_is_seeded_with_ranges() -> None:
@@ -41,10 +41,10 @@ async def test_catalog_is_seeded_with_ranges() -> None:
         "SELECT codigo, orden, division_desde, division_hasta, version_cnae FROM sector_actividad ORDER BY orden"
     )
     assert [f["codigo"] for f in filas] == list(CODIGOS_ACTIVIDAD)
-    assert [f["orden"] for f in filas] == list(range(1, 23))
+    assert [f["orden"] for f in filas] == list(range(1, 24))
     for f in filas[:-1]:
         assert (f["division_desde"], f["division_hasta"]) == SECCIONES[f["codigo"]]
-        assert f["version_cnae"] == "CNAE-2009"
+        assert f["version_cnae"] == "CNAE-2025"
     otra = filas[-1]
     assert (otra["division_desde"], otra["division_hasta"]) == (None, None)
 
@@ -112,7 +112,7 @@ async def test_migration_up_down_on_scratch_database() -> None:
             ).one()
             n = (await c.execute(text("SELECT count(*) FROM sector_actividad"))).scalar_one()
         assert tuple(vieja) == (None, "Tecnologia")  # pending, sector kept as a hint
-        assert n == 22
+        assert n == 23
 
         base.alembic("downgrade", REVISION_ANTERIOR)
         async with base.motor.connect() as c:

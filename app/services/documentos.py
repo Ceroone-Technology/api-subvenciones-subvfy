@@ -61,7 +61,13 @@ def almacen() -> AlmacenDocumentos:
 
 
 async def cliente_bdns() -> AsyncGenerator[ClienteBdnsSync, None]:
-    """Dependencia de FastAPI: un cliente por petición, con el cubo de tokens compartido."""
+    """Dependencia de FastAPI: un cliente por petición, con el cubo de tokens compartido.
+
+    El breaker es **por petición**, a propósito: la cuenta de fallos seguidos nace a cero con cada cliente, así que
+    nunca se abre entre peticiones distintas (solo corta los reintentos de una misma descarga). Lo que sí se
+    comparte, y limita la presión sobre la BDNS, es el cubo de tokens. Un breaker global exigiría estado de proceso,
+    que en Lambda no se conserva (Hito 7).
+    """
     async with ClienteBdnsSync(
         cubo=_CUBO,
         vpd=settings.bdns_vpd,
@@ -78,6 +84,22 @@ def nombre_seguro(*candidatos: str | None, id_documento: int) -> str:
         if candidato and (limpio := _NO_SEGURO.sub("_", candidato).strip(" ._")[:150]):
             return limpio
     return f"documento-{id_documento}"
+
+
+_MIME_VALIDO = re.compile(r"^[a-z0-9][a-z0-9!#$&^_.+-]{0,99}/[a-z0-9][a-z0-9!#$&^_.+-]{0,99}$")
+# Tipos que un navegador ejecuta o interpreta como página: nunca se sirven como lo que dice la BDNS.
+_MIME_ACTIVO = {
+    "text/html", "application/xhtml+xml", "image/svg+xml", "text/xml", "application/xml",
+    "text/javascript", "application/javascript",
+}  # fmt: skip
+
+
+def mime_seguro(mime: str | None) -> str:
+    """El `Content-Type` llega de la BDNS: se sirve solo si tiene forma de tipo MIME y no es activo."""
+    limpio = (mime or "").strip().lower()
+    if not _MIME_VALIDO.match(limpio) or limpio in _MIME_ACTIVO:
+        return "application/octet-stream"
+    return limpio
 
 
 def _ids_de_documentos(detalle: dict[str, Any] | None) -> dict[int, str | None]:
@@ -116,7 +138,7 @@ async def servir(
     if doc is not None and doc.sha256 and await almacen_documentos.existe(clave_de(doc.sha256)):
         resultado = DocumentoListo(
             clave_de(doc.sha256),
-            doc.mime or "application/octet-stream",
+            mime_seguro(doc.mime),
             nombre_seguro(doc.nombre_archivo, nombre_ficha, id_documento=id_documento),
             doc.tamano or 0,
             "cache",
@@ -127,7 +149,7 @@ async def servir(
         try:
             async with cliente.descargar_documento(id_documento, max_bytes=max_bytes()) as descarga:
                 sha, tamano = await almacen_documentos.guardar(descarga.contenido, max_bytes())
-                mime, nombre_bdns = descarga.mime or "application/octet-stream", descarga.nombre_archivo
+                mime, nombre_bdns = mime_seguro(descarga.mime), descarga.nombre_archivo
         except (BdnsNoDisponible, CircuitoAbierto) as exc:
             logger.warning("Doc %s (conv. %s): BDNS no disponible (%s).", id_documento, conv_id, type(exc).__name__)
             raise BdnsDocumentoNoDisponible from exc

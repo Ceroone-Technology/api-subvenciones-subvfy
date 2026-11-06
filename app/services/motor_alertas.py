@@ -139,7 +139,7 @@ def _desde_de(alerta: Alerta) -> datetime:
     arrastrar el histórico entero.
     """
     if alerta.ultima_ejecucion_at is not None:
-        return alerta.ultima_ejecucion_at
+        return alerta.ultima_ejecucion_at - timedelta(minutes=settings.alertas_solape_minutos)
     return datetime.now(UTC) - timedelta(days=settings.bdns_dias_primera_ejecucion)
 
 

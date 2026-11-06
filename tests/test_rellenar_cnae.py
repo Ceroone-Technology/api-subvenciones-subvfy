@@ -54,7 +54,7 @@ async def test_fills_only_rows_with_sectors_and_no_sections() -> None:
         r = await rellenar_cnae(db, cliente, limite=50, prefijo=PREFIJO_TEST)
     assert cliente.pedidos == [pendiente]
     assert (r.actualizadas, r.sin_seccion, r.errores) == (1, 0, 0)
-    assert await _secciones(pendiente) == ["J", "O"]
+    assert await _secciones(pendiente) == ["K", "P"]
     assert await _secciones(rellena) == ["C"]
     assert await _secciones(sin_sector) == []
 

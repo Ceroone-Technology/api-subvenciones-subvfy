@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import os
 import re
+import time
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -20,6 +21,19 @@ from app.config import Settings, settings
 
 CHUNK = 64 * 1024
 _CLAVE = re.compile(r"^documentos/([0-9a-f]{2})/([0-9a-f]{64})$")
+# Un temporal de esta edad es resto de un proceso muerto (un fallo normal lo borra en `guardar`).
+EDAD_TEMPORAL_HUERFANO_SEGUNDOS = 3600
+
+
+def _barrer_temporales(tmp_dir: Path) -> None:
+    """Borra los temporales viejos que dejó un proceso interrumpido (un `kill` salta el `except` de `guardar`)."""
+    limite = time.time() - EDAD_TEMPORAL_HUERFANO_SEGUNDOS
+    for fichero in tmp_dir.iterdir():
+        try:
+            if fichero.is_file() and fichero.stat().st_mtime < limite:
+                fichero.unlink()
+        except OSError:  # otro proceso lo borró o lo está usando: no es motivo para fallar el guardado
+            continue
 
 
 class DocumentoDemasiadoGrande(Exception):
@@ -55,6 +69,7 @@ class AlmacenLocal:
         """Escribe el flujo (con tope) y devuelve `(sha256, tamano)`. Ante cualquier fallo no deja nada."""
         tmp_dir = self._raiz / "tmp"
         await asyncio.to_thread(tmp_dir.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(_barrer_temporales, tmp_dir)
         tmp = tmp_dir / uuid.uuid4().hex
         sha = hashlib.sha256()
         tamano = 0

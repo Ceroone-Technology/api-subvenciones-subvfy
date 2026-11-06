@@ -16,12 +16,12 @@ def _alta(**extra) -> dict:
 # --- catalog -------------------------------------------------------------------------------
 
 
-async def test_catalog_lists_22_options_in_order(client_usuario: AsyncClient) -> None:
+async def test_catalog_lists_23_options_in_order(client_usuario: AsyncClient) -> None:
     r = await client_usuario.get("/catalogos/actividades")
     assert r.status_code == 200
     cuerpo = r.json()
-    assert len(cuerpo) == 22
-    assert [o["orden"] for o in cuerpo] == list(range(1, 23))
+    assert len(cuerpo) == 23
+    assert [o["orden"] for o in cuerpo] == list(range(1, 24))
     assert cuerpo[0] == {"codigo": "A", "descripcion": "Agricultura, ganadería, silvicultura y pesca", "orden": 1}
     assert cuerpo[-1]["codigo"] == "OTRA"
     assert set(cuerpo[0]) == {"codigo", "descripcion", "orden"}  # no division ranges leaked
