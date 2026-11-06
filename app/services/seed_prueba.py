@@ -13,6 +13,7 @@ Rules that make it safe:
 
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as insert_postgresql
@@ -42,8 +43,8 @@ TELEFONO = "+34 600 123 456"
 CARGO = "Directora de innovación"
 OBJETIVO_FAVORITOS = 8
 OBJETIVO_DESCARTES = 2
-# Days from today at which the seeded favorites should close (varied on purpose: urgent to far).
 DIAS_ACCESO_PREVIO = 3
+# Days from today at which the seeded favorites should close (varied on purpose: urgent to far).
 DIAS_CIERRE = (2, 5, 9, 13, 20, 30, 50, 90)
 
 PERFIL = {
@@ -207,10 +208,17 @@ async def _favoritos(db: AsyncSession, usuario: Usuario, pool: list[Convocatoria
     resumen.anadir(f"Favoritos: {len(elegidas)} añadidos con nota, cierran: {cierres}.")
 
 
-async def _alertas(db: AsyncSession, usuario: Usuario, pool: list[Convocatoria], resumen: Resumen) -> None:
+async def _alertas(
+    db: AsyncSession,
+    usuario: Usuario,
+    pool: list[Convocatoria],
+    resumen: Resumen,
+    *,
+    alertas: tuple[Any, ...] = ALERTAS,
+) -> None:
     uid, ahora = usuario.id, datetime.now(UTC)
     creadas = ejecuciones = 0
-    for indice, (nombre, texto, nivel, frecuencia, canal, corridas) in enumerate(ALERTAS):
+    for indice, (nombre, texto, nivel, frecuencia, canal, corridas) in enumerate(alertas):
         nombre_completo = f"{PREFIJO_ALERTA}{nombre}"
         existe = await db.scalar(select(Alerta.id).where(Alerta.usuario_id == uid, Alerta.nombre == nombre_completo))
         if existe is not None:
@@ -245,7 +253,7 @@ async def _alertas(db: AsyncSession, usuario: Usuario, pool: list[Convocatoria],
             ejecuciones += 1
         alerta.ultima_ejecucion_at = max(ahora - timedelta(hours=h) for h, _, _ in corridas)
         creadas += 1
-    resumen.anadir(f"Alertas: {creadas} creadas con {ejecuciones} ejecuciones ({len(ALERTAS) - creadas} ya existían).")
+    resumen.anadir(f"Alertas: {creadas} creadas con {ejecuciones} ejecuciones ({len(alertas) - creadas} ya existían).")
 
 
 async def _tablero(
@@ -322,14 +330,6 @@ async def _descartes(db: AsyncSession, usuario: Usuario, pool: list[Convocatoria
     resumen.anadir(f"Descartes: {len(elegidas)} convocatorias ocultas del radar (las de cierre más lejano).")
 
 
-async def _preferencias(db: AsyncSession, usuario: Usuario, resumen: Resumen) -> None:
-    for tipo, email, app in PREFERENCIAS:
-        valores = {"email": email, "app": app}
-        await db.execute(
-            insert_postgresql(PreferenciaAviso)
-            .values(usuario_id=usuario.id, tipo=tipo, created_by=usuario.id, updated_by=usuario.id, **valores)
-            .on_conflict_do_update(
-                index_elements=[PreferenciaAviso.usuario_id, PreferenciaAviso.tipo], set_={**valores}
 async def _acceso_previo(usuario: Usuario, resumen: Resumen) -> None:
     """Gives the Inicio counters a "since your last visit" window (only when the user has none)."""
     if usuario.ultimo_acceso_previo_at is None:
@@ -339,6 +339,14 @@ async def _acceso_previo(usuario: Usuario, resumen: Resumen) -> None:
         resumen.anadir("Acceso previo: ya tenía uno, no se toca.")
 
 
+async def _preferencias(db: AsyncSession, usuario: Usuario, resumen: Resumen) -> None:
+    for tipo, email, app in PREFERENCIAS:
+        valores = {"email": email, "app": app}
+        await db.execute(
+            insert_postgresql(PreferenciaAviso)
+            .values(usuario_id=usuario.id, tipo=tipo, created_by=usuario.id, updated_by=usuario.id, **valores)
+            .on_conflict_do_update(
+                index_elements=[PreferenciaAviso.usuario_id, PreferenciaAviso.tipo], set_={**valores}
             )
         )
     resumen.anadir(f"Preferencias de aviso: {len(PREFERENCIAS)} tipos guardados.")
@@ -368,6 +376,6 @@ async def sembrar(db: AsyncSession, email: str, *, hoy: date | None = None) -> R
     await _tablero(db, usuario, pool, hoy, resumen)
     await _descartes(db, usuario, pool, resumen)
     await _preferencias(db, usuario, resumen)
+    await _acceso_previo(usuario, resumen)
     await db.commit()
     return resumen
-    await _acceso_previo(usuario, resumen)
