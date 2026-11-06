@@ -27,7 +27,7 @@ from app.config import settings
 # Longitud máxima que acepta bcrypt, en bytes UTF-8 (no en caracteres: una ñ
 # ocupa dos). Se expone para que los schemas y la CLI la usen en vez de
 # repetir el número.
-PASSWORD_MIN_LONGITUD = 8
+PASSWORD_MIN_LONGITUD = 12  # plan N11: la política de las claves nuevas (login y claves ya guardadas no se tocan)
 PASSWORD_MAX_BYTES = 72
 
 # Las mismas rondas y el mismo prefijo ($2b$) que usaba passlib: los hashes

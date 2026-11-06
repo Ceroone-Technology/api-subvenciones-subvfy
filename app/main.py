@@ -22,6 +22,7 @@ from app.api.routes import (
     convocatorias,
     empresas,
     favoritos,
+    preferencias_aviso,
     roles,
     seguimiento,
     usuarios,
@@ -73,6 +74,7 @@ app.include_router(usuarios.router)
 app.include_router(favoritos.router)
 app.include_router(seguimiento.router)
 app.include_router(calendario.router)
+app.include_router(preferencias_aviso.router)
 app.include_router(alertas.router)
 app.include_router(admin_sync.router)
 app.include_router(admin_documentos.router)

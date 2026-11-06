@@ -16,6 +16,7 @@ from sqlalchemy import func, select
 
 from app.api.deps import DbDep
 from app.config import settings
+from app.core.limite_intentos import cambio_de_password
 from app.core.permisos import UsuarioActualDep, motivo_cuenta_no_operativa
 from app.core.security import (
     TIPO_REFRESH,
@@ -27,7 +28,14 @@ from app.core.security import (
     verificar_password,
 )
 from app.models import Empresa, Usuario
-from app.schemas.auth import LoginRequest, RefreshRequest, SesionResponse, TokenResponse, UsuarioSesionRead
+from app.schemas.auth import (
+    CambiarPasswordRequest,
+    LoginRequest,
+    RefreshRequest,
+    SesionResponse,
+    TokenResponse,
+    UsuarioSesionRead,
+)
 from app.schemas.empresa import EmpresaSesion
 from app.schemas.usuario import UsuarioRead
 
@@ -155,3 +163,32 @@ async def usuario_de_la_sesion(actual: UsuarioActualDep, db: DbDep) -> UsuarioSe
     return UsuarioSesionRead.model_validate(
         {**UsuarioRead.model_validate(actual.usuario).model_dump(), "empresa": EmpresaSesion.model_validate(empresa)}
     )
+
+
+@router.post(
+    "/cambiar-password",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Cambiar mi contraseña (pide la actual)",
+    responses={
+        400: {"description": "La contraseña actual no es correcta, o la nueva es igual a la actual."},
+        429: {"description": "Demasiados intentos fallidos seguidos."},
+    },
+)
+async def cambiar_password(datos: CambiarPasswordRequest, db: DbDep, actual: UsuarioActualDep) -> None:
+    """Un 400 y no un 401 cuando la actual es incorrecta: el interceptor del frontend renueva el token ante un 401,
+    y aquí el token es válido; lo que falla es el dato. La nueva sigue la política de las claves nuevas (mínimo 12
+    caracteres, máximo 72 bytes)."""
+    if cambio_de_password.bloqueado(actual.id):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS, detail="Demasiados intentos fallidos. Inténtalo en unos minutos."
+        )
+    # bcrypt se paga siempre, acierte o no, igual que en el login.
+    if not verificar_password(datos.password_actual, actual.usuario.password_hash):
+        cambio_de_password.registrar_fallo(actual.id)
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="La contraseña actual no es correcta.")
+    if datos.password_nueva == datos.password_actual:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="La contraseña nueva debe ser distinta de la actual.")
+    cambio_de_password.olvidar(actual.id)
+    actual.usuario.password_hash = hashear_password(datos.password_nueva)
+    actual.usuario.updated_by = actual.id
+    await db.commit()

@@ -4,7 +4,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 from app.core.security import PASSWORD_MAX_BYTES
 from app.schemas.empresa import EmpresaSesion
-from app.schemas.usuario import UsuarioRead
+from app.schemas.usuario import Password, UsuarioRead
 
 
 class LoginRequest(BaseModel):
@@ -41,3 +41,11 @@ class UsuarioSesionRead(UsuarioRead):
     actividad pendiente sin una llamada más."""
 
     empresa: EmpresaSesion
+
+
+class CambiarPasswordRequest(BaseModel):
+    """`POST /auth/cambiar-password`: pide la contraseña actual, a diferencia de `PATCH /usuarios/{id}`."""
+
+    # Como en el login, la actual no se valida con las reglas de la política: solo se compara.
+    password_actual: str = Field(max_length=PASSWORD_MAX_BYTES)
+    password_nueva: Password

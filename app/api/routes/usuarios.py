@@ -193,6 +193,12 @@ async def actualizar_usuario(
         actual.exigir_rol_asignable(rol_nuevo.codigo)
     if "email" in cambios:
         await _exigir_email_libre(db, cambios["email"], excluir_id=usuario_id)
+    if "password" in cambios and usuario.id == actual.id:
+        # Sin la actual, un token robado bastaría para apropiarse de la cuenta: se cambia con
+        # POST /auth/cambiar-password. Restablecer la de un compañero sigue siendo cosa de gestión.
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, detail="Tu contraseña se cambia en POST /auth/cambiar-password."
+        )
     if "password" in cambios:
         usuario.password_hash = hashear_password(cambios.pop("password"))
 

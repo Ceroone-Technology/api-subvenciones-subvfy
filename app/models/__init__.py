@@ -21,6 +21,7 @@ from app.models.favorito import Favorito
 from app.models.gestion_excepcion import GestionExcepcion
 from app.models.interes import EmpresaInteres, Interes
 from app.models.mensaje_asistente import MensajeAsistente
+from app.models.preferencia_aviso import PreferenciaAviso
 from app.models.rol import Rol
 from app.models.sector_actividad import SectorActividad
 from app.models.seguimiento import Seguimiento, SeguimientoEvento, SeguimientoTarea
@@ -46,6 +47,7 @@ __all__ = [
     "GestionExcepcion",
     "Interes",
     "MensajeAsistente",
+    "PreferenciaAviso",
     "Rol",
     "SectorActividad",
     "Seguimiento",

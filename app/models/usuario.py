@@ -16,6 +16,7 @@ class Usuario(Base, AuditMixin):
         Index("ix_usuario_empresa", "empresa_id"),
         Index("ix_usuario_email", "email"),
         UniqueConstraint("calendario_token", name="uq_usuario_calendario_token"),
+        CheckConstraint(r"telefono IS NULL OR telefono ~ '^\+?[0-9 ()\-.]{6,30}$'", name="ck_usuario_telefono"),
         CheckConstraint(
             "calendario_token IS NULL OR length(calendario_token) >= 32", name="ck_usuario_calendario_token"
         ),
@@ -30,6 +31,8 @@ class Usuario(Base, AuditMixin):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     estado: Mapped[str] = mapped_column(String(20), nullable=False, default="activo", server_default="activo")
     ultimo_acceso_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Opcional (plan N11). El formato lo valida el schema y lo repite el CHECK de la tabla.
+    telefono: Mapped[str | None] = mapped_column(String(30))
     # Secret of the personal calendar feed (plan N6). `secrets.token_urlsafe(32)`, created on first use and
     # replaced on rotation. Never serialised by the user schemas.
     calendario_token: Mapped[str | None] = mapped_column(String(64))

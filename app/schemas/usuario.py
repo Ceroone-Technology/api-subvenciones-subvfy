@@ -5,10 +5,11 @@ de la API. En escritura se recibe `password` en claro y el router la hashea
 con `app.core.security` antes de persistir.
 """
 
+import re
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, EmailStr, Field
+from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, EmailStr, Field
 
 from app.core.security import PASSWORD_MAX_BYTES, PASSWORD_MIN_LONGITUD
 from app.models.usuario import ESTADOS_USUARIO
@@ -44,6 +45,27 @@ Password = Annotated[
     AfterValidator(_cabe_en_bcrypt),
 ]
 Nombre = Annotated[str, Field(min_length=1, max_length=100)]
+_TELEFONO = re.compile(r"^\+?[0-9 ()\-.]{6,30}$")
+
+
+def _normalizar_telefono(valor: object) -> object:
+    """Strips blanks; an empty string clears the phone. The format is the one the table CHECK repeats."""
+    if isinstance(valor, str):
+        valor = valor.strip()
+        return valor or None
+    return valor
+
+
+def _validar_telefono(telefono: str | None) -> str | None:
+    if telefono is None:
+        return None
+    digitos = sum(c.isdigit() for c in telefono)
+    if not _TELEFONO.fullmatch(telefono) or not 6 <= digitos <= 15:
+        raise ValueError("Teléfono no válido: de 6 a 15 cifras; admite +, espacios, puntos, guiones y paréntesis.")
+    return telefono
+
+
+Telefono = Annotated[str | None, BeforeValidator(_normalizar_telefono), AfterValidator(_validar_telefono)]
 Apellidos = Annotated[str, Field(min_length=1, max_length=150)]
 
 
@@ -53,6 +75,7 @@ class UsuarioBase(BaseModel):
     nombre: Nombre
     apellidos: Apellidos
     email: EmailStr = Field(max_length=200)
+    telefono: Telefono = None
 
 
 class UsuarioCreate(UsuarioBase):
@@ -68,6 +91,7 @@ class UsuarioUpdate(BaseModel):
     nombre: Nombre | None = None
     apellidos: Apellidos | None = None
     email: EmailStr | None = Field(default=None, max_length=200)
+    telefono: Telefono = None
     password: Password | None = None
     estado: EstadoUsuario | None = None
 
