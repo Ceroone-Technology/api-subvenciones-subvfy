@@ -30,6 +30,7 @@ from app.core.security import crear_access_token, hashear_password
 from app.database import AsyncSessionLocal
 from app.main import app
 from app.models import (
+    AdminLecturaCliente,
     Alerta,
     AlertaEjecucion,
     AlertaEjecucionConvocatoria,
@@ -207,6 +208,13 @@ async def limpiar_datos_de_test() -> AsyncGenerator[None, None]:
         # test puede firmar con un usuario de prueba: sus filas se borran antes
         # que los usuarios (FK de auditoría), igual que las marcadas con TEST-.
         usuarios_firmantes = select(Usuario.id).where(Usuario.email.like(f"%{EMAIL_DOMINIO_TEST}"))
+        await db.execute(  # audit log of admin reads: signed by test users (FK without cascade)
+            delete(AdminLecturaCliente).where(
+                AdminLecturaCliente.admin_usuario_id.in_(usuarios_firmantes)
+                | AdminLecturaCliente.created_by.in_(usuarios_firmantes)
+                | AdminLecturaCliente.updated_by.in_(usuarios_firmantes)
+            )
+        )
         await db.execute(
             delete(CatalogoBdns).where(
                 CatalogoBdns.descripcion.like(f"{MARCA_TEST}%")

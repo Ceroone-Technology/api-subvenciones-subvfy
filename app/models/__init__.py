@@ -4,6 +4,7 @@ autogenerate los necesita importados, no solo definidos en sus archivos).
 Implementan, tabla por tabla, el esquema ya diseñado en schema-subvfy.sql.
 """
 
+from app.models.admin_lectura_cliente import AdminLecturaCliente
 from app.models.alerta import Alerta
 from app.models.alerta_ejecucion import AlertaEjecucion
 from app.models.alerta_ejecucion_convocatoria import AlertaEjecucionConvocatoria
@@ -39,6 +40,7 @@ __all__ = [
     "CatalogoBdns",
     "Convocatoria",
     "ConvocatoriaDocumento",
+    "AdminLecturaCliente",
     "Descarte",
     "DocumentoAcceso",
     "ConversacionAsistente",

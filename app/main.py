@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import (
+    admin_clientes,
     admin_documentos,
     admin_gestion,
     admin_sync,
@@ -90,6 +91,7 @@ app.include_router(alertas.router)
 app.include_router(admin_sync.router)
 app.include_router(admin_documentos.router)
 app.include_router(admin_gestion.router)
+app.include_router(admin_clientes.router)
 app.include_router(convocatorias.router)
 app.include_router(radar.router)
 app.include_router(descartes.router)
