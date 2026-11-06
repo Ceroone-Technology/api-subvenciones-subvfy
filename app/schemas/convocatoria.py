@@ -9,8 +9,9 @@ es "guárdate esta copia de lo que acabo de leer en la BDNS".
 
 from datetime import date, datetime
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.convocatoria import NIVELES_ADMINISTRACION, TEMAS
 from app.services.convocatoria_estado import EstadoConvocatoria
@@ -38,6 +39,21 @@ class ConvocatoriaUpsert(BaseModel):
     fecha_registro: date | None = None
     url_portal_oficial: str | None = Field(default=None, max_length=500)
     financiada_mrr: bool | None = None
+
+    @field_validator("url_portal_oficial")
+    @classmethod
+    def _url_http(cls, valor: str | None) -> str | None:
+        """Only absolute http(s) links with a host: the value ends up as a clickable link for every company."""
+        if valor is None:
+            return None
+        try:
+            partes = urlsplit(valor.strip())
+            ok = partes.scheme.lower() in ("http", "https") and bool(partes.hostname)
+        except ValueError:
+            ok = False
+        if not ok or any(c.isspace() or ord(c) < 32 for c in valor.strip()):
+            raise ValueError("La URL debe ser una dirección http:// o https:// completa.")
+        return valor.strip()
 
 
 class ConvocatoriaRead(BaseModel):

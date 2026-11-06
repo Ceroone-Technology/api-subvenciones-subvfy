@@ -14,7 +14,7 @@ arrastrar ningún identificador interno.
 
 **Marcar un favorito siembra la caché.** `convocatoria` es una copia local
 de la BDNS (no la fuente de verdad), así que el POST trae la ficha dentro y
-hace upsert: si ya estaba cacheada se refresca, y si no, se crea. Sin esto,
+la siembra solo si no estaba cacheada (nunca sobrescribe: la tabla es de todos). Sin esto,
 la FK `favorito.convocatoria_id` no tendría a qué apuntar.
 """
 
@@ -45,31 +45,24 @@ _NO_ENCONTRADO = HTTPException(
 
 
 async def _cachear_convocatoria(db: DbDep, datos: ConvocatoriaUpsert, usuario_id: int) -> int:
-    """Upsert por `codigo_bdns`, devolviendo el id local.
+    """Id local de la convocatoria; la siembra solo si aún no está cacheada.
 
-    Solo se sobrescriben los campos que el cliente ha enviado
-    (`exclude_unset`): marcar un favorito desde el listado de resultados,
-    donde la ficha viene incompleta, no puede borrar los datos que una
-    sincronización anterior ya había guardado.
+    **La tabla es compartida por todas las empresas**, así que un cliente nunca
+    sobrescribe una fila existente: `ON CONFLICT DO NOTHING`, como el tablero
+    de seguimiento. La fila sembrada es un marcador de posición: sin
+    `url_portal_oficial` (la sincronización nunca lo rellena y un enlace del
+    cliente se quedaría para siempre) y sin `detalle_sync_at`, de modo que la
+    sincronización la completa y reescribe el título con el dato oficial.
     """
-    valores = datos.model_dump(exclude_unset=True)
-    actualizables = {
-        campo: valor for campo, valor in valores.items() if campo != "codigo_bdns" and valor is not None
-    }
-
-    insercion = insert_postgresql(Convocatoria).values(
-        **valores, created_by=usuario_id, updated_by=usuario_id
+    valores = datos.model_dump(exclude_unset=True, exclude={"url_portal_oficial"})
+    await db.execute(
+        insert_postgresql(Convocatoria)
+        .values(**valores, created_by=usuario_id, updated_by=usuario_id)
+        .on_conflict_do_nothing(index_elements=[Convocatoria.codigo_bdns])
     )
-    sentencia = insercion.on_conflict_do_update(
-        index_elements=[Convocatoria.codigo_bdns],
-        set_={
-            **actualizables,
-            "sincronizado_at": func.now(),
-            "updated_at": func.now(),
-            "updated_by": usuario_id,
-        },
-    ).returning(Convocatoria.id)
-    return (await db.execute(sentencia)).scalar_one()
+    return (
+        await db.execute(select(Convocatoria.id).where(Convocatoria.codigo_bdns == datos.codigo_bdns))
+    ).scalar_one()
 
 
 async def _obtener_favorito_o_404(
