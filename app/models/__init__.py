@@ -14,6 +14,7 @@ from app.models.catalogo_bdns import CatalogoBdns
 from app.models.conversacion_asistente import ConversacionAsistente
 from app.models.convocatoria import Convocatoria
 from app.models.convocatoria_documento import ConvocatoriaDocumento
+from app.models.descarte import Descarte
 from app.models.documento_acceso import DocumentoAcceso
 from app.models.empresa import Empresa
 from app.models.empresa_palabra_clave import EmpresaPalabraClave
@@ -38,6 +39,7 @@ __all__ = [
     "CatalogoBdns",
     "Convocatoria",
     "ConvocatoriaDocumento",
+    "Descarte",
     "DocumentoAcceso",
     "ConversacionAsistente",
     "Empresa",

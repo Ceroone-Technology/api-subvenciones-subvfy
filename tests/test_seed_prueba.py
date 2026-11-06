@@ -14,6 +14,7 @@ from app.models import (
     Alerta,
     AlertaEjecucion,
     AlertaEjecucionConvocatoria,
+    Descarte,
     Empresa,
     EmpresaInteres,
     Favorito,
@@ -44,6 +45,7 @@ async def _foto(sesion: Sesion) -> dict:
         assert empresa is not None and usuario is not None
         return {
             "favoritos": await _contar(Favorito, Favorito.usuario_id == sesion.id),
+            "descartes": await _contar(Descarte, Descarte.usuario_id == sesion.id),
             "alertas": await _contar(Alerta, Alerta.usuario_id == sesion.id),
             "tarjetas": await _contar(Seguimiento, Seguimiento.empresa_id == sesion.empresa_id),
             "preferencias": await _contar(PreferenciaAviso, PreferenciaAviso.usuario_id == sesion.id),
@@ -110,6 +112,7 @@ async def test_seeds_the_whole_account(gestor: Sesion, otro_gestor: Sesion, abie
     assert {t.resultado for t in tarjetas if t.estado == "resuelta"} == {"concedida", "denegada"}
     assert all(t.responsable_usuario_id in (gestor.id, otro_gestor.id) for t in tarjetas)
     assert await _contar(SeguimientoTarea, SeguimientoTarea.seguimiento_id.in_([t.id for t in tarjetas])) > 8
+    assert await _contar(Descarte, Descarte.usuario_id == gestor.id) == 2
     assert await _contar(PreferenciaAviso, PreferenciaAviso.usuario_id == gestor.id) == 5
 
 
@@ -164,7 +167,7 @@ async def test_it_touches_only_that_account(gestor: Sesion, otro_gestor: Sesion,
     despues_colega, despues_ajeno = await _foto(otro_gestor), await _foto(otro)
     # The colleague shares the company, so the company-level seed (profile, interests, board) is visible to him;
     # what is his own stays: favorites, alerts, preferences, phone.
-    for clave in ("favoritos", "alertas", "preferencias", "telefono"):
+    for clave in ("favoritos", "descartes", "alertas", "preferencias", "telefono"):
         assert despues_colega[clave] == antes_colega[clave], clave
     assert despues_ajeno == antes_ajeno
     assert await _contar(Alerta, Alerta.usuario_id == otro_gestor.id) == 1

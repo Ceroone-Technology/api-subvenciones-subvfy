@@ -31,10 +31,11 @@ async def obtener(
     """Afinidad determinista (CNAE 40, zona 20, tamaño 15, intereses 15, plazo 10), calculada al vuelo.
 
     Solo convocatorias abiertas; si la empresa tiene actividad CNAE, se parte de las de su sector o sin sector.
+    Las que el usuario descartó (`POST /descartes`) no aparecen.
     Cada oportunidad explica su puntuación con `motivos` (por qué encaja) y `dudas` (qué comprobar).
     """
     total, oportunidades = await servicio.radar(
-        db, actual.empresa_id, minimo=min, temas=tema or (), gestiona=gestiona, limite=limit
+        db, actual.empresa_id, usuario_id=actual.id, minimo=min, temas=tema or (), gestiona=gestiona, limite=limit
     )
     items = [
         OportunidadRadar(

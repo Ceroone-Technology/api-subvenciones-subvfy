@@ -24,6 +24,7 @@ from app.models import (
     AlertaEjecucion,
     AlertaEjecucionConvocatoria,
     Convocatoria,
+    Descarte,
     Empresa,
     EmpresaInteres,
     Favorito,
@@ -39,6 +40,7 @@ MARCA = "(dato de prueba)"
 PREFIJO_ALERTA = "Prueba: "
 TELEFONO = "+34 600 123 456"
 OBJETIVO_FAVORITOS = 8
+OBJETIVO_DESCARTES = 2
 # Days from today at which the seeded favorites should close (varied on purpose: urgent to far).
 DIAS_CIERRE = (2, 5, 9, 13, 20, 30, 50, 90)
 
@@ -297,6 +299,18 @@ async def _tablero(
     resumen.anadir(f"Seguimiento: {sum(columnas.values())} tarjetas ({detalle}), con tareas y responsable.")
 
 
+async def _descartes(db: AsyncSession, usuario: Usuario, pool: list[Convocatoria], resumen: Resumen) -> None:
+    hay = await db.scalar(select(func.count()).where(Descarte.usuario_id == usuario.id))
+    if hay:
+        resumen.anadir(f"Descartes: ya había {hay}, no se añaden más.")
+        return
+    propios = set(await db.scalars(select(Favorito.convocatoria_id).where(Favorito.usuario_id == usuario.id)))
+    elegidas = [c for c in reversed(pool) if c.id not in propios][:OBJETIVO_DESCARTES]
+    for c in elegidas:
+        db.add(Descarte(usuario_id=usuario.id, convocatoria_id=c.id, created_by=usuario.id, updated_by=usuario.id))
+    resumen.anadir(f"Descartes: {len(elegidas)} convocatorias ocultas del radar (las de cierre más lejano).")
+
+
 async def _preferencias(db: AsyncSession, usuario: Usuario, resumen: Resumen) -> None:
     for tipo, email, app in PREFERENCIAS:
         valores = {"email": email, "app": app}
@@ -331,6 +345,7 @@ async def sembrar(db: AsyncSession, email: str, *, hoy: date | None = None) -> R
     await _favoritos(db, usuario, pool, hoy, resumen)
     await _alertas(db, usuario, pool, resumen)
     await _tablero(db, usuario, pool, hoy, resumen)
+    await _descartes(db, usuario, pool, resumen)
     await _preferencias(db, usuario, resumen)
     await db.commit()
     return resumen

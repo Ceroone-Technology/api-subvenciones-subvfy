@@ -20,6 +20,7 @@ from app.api.routes import (
     calendario,
     catalogos,
     convocatorias,
+    descartes,
     direcciones,
     empresas,
     favoritos,
@@ -84,6 +85,7 @@ app.include_router(admin_documentos.router)
 app.include_router(admin_gestion.router)
 app.include_router(convocatorias.router)
 app.include_router(radar.router)
+app.include_router(descartes.router)
 app.include_router(catalogos.router)
 
 # Los routers de negocio restantes (análisis IA)

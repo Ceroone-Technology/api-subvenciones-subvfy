@@ -19,6 +19,7 @@ from app.services import busqueda_convocatorias as busqueda
 from app.services.afinidad import PerfilAfinidad, ResultadoAfinidad, SenalesConvocatoria, calcular
 from app.services.busqueda_convocatorias import COLUMNAS_LISTADO, FiltrosBusqueda
 from app.services.convocatoria_estado import ABIERTA, ABIERTA_SIN_PLAZO, estado_expr, hoy_madrid
+from app.services.descartes import no_descartada
 from app.services.empresas import intereses_de
 from app.services.zonas import comunidad_de_empresa, comunidad_de_nuts, comunidades_de_regiones
 
@@ -103,18 +104,25 @@ async def radar(
     db: AsyncSession,
     empresa_id: int,
     *,
+    usuario_id: int | None = None,
     minimo: int = 0,
     temas: Sequence[str] = (),
     gestiona: bool | None = None,
     limite: int = 50,
 ) -> tuple[int, list[Oportunidad]]:
-    """`(how many reach `minimo`, the best `limite` of them)` for a company, open calls only."""
+    """`(how many reach `minimo`, the best `limite` of them)` for a company, open calls only.
+
+    With `usuario_id`, the grants that user discarded (N4) are left out.
+    """
     perfil = await perfil_de(db, empresa_id)
     seccion = seccion_para_filtrar(perfil)
     filtros = FiltrosBusqueda(
         estado=ESTADOS_ABIERTOS, tema=tuple(temas), gestiona=gestiona, actividad=(seccion,) if seccion else ()
     )
-    candidatas = await _candidatas(db, busqueda.condiciones(filtros), busqueda.ordenar("cierre", filtros))
+    donde = busqueda.condiciones(filtros)
+    if usuario_id is not None:
+        donde.append(no_descartada(usuario_id))
+    candidatas = await _candidatas(db, donde, busqueda.ordenar("cierre", filtros))
     puntuadas = [o for o in puntuar(candidatas, perfil, await mapa_comunidades(db)) if o.resultado.afinidad >= minimo]
     puntuadas.sort(key=_orden_mejor)
     return len(puntuadas), puntuadas[:limite]
