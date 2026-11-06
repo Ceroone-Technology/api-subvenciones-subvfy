@@ -74,7 +74,7 @@ async def test_requiere_login(client: AsyncClient) -> None:
 async def test_ruta_no_se_confunde_con_el_detalle(client_usuario: AsyncClient) -> None:
     r = await client_usuario.get("/convocatorias/mapa")
     assert r.status_code == 200
-    assert set(r.json()) == {"total", "presupuesto_total", "por_comunidad", "estatal", "sin_zona"}
+    assert set(r.json()) == {"total", "presupuesto_total", "por_comunidad", "estatal", "sin_zona", "exterior"}
 
 
 async def test_reparte_por_comunidad_estatal_y_sin_zona(client_usuario: AsyncClient) -> None:
@@ -136,6 +136,7 @@ async def test_vacio_devuelve_ceros(client_usuario: AsyncClient) -> None:
         "por_comunidad": [],
         "estatal": {"total": 0, "abiertas": 0, "presupuesto": 0},
         "sin_zona": {"total": 0},
+        "exterior": {"total": 0, "abiertas": 0, "presupuesto": 0},
     }
 
 
@@ -156,3 +157,55 @@ def test_la_cache_esta_acotada() -> None:
         servicio._guardar(("k", i), {"total": i})
     assert servicio.tamano_cache() <= servicio.CACHE_MAX_ENTRADAS
     servicio.limpiar_cache()
+
+
+# Test copies of the real region nodes (codes and parents as in the BDNS catalogue).
+UK, UKZ, TODO_EL_MUNDO = 9_201_001, 9_201_002, 9_201_003
+ES5, ES51, ES52, ES53 = 9_201_010, 9_201_011, 9_201_012, 9_201_013
+
+
+async def sembrar_catalogo_exterior() -> None:
+    await sembrar_catalogo()
+    nodos = (
+        (UK, "UK", "UK - UNITED KINGDOM", None),
+        (UKZ, "UKZ", "UKZ - EXTRA-REGIO NUTS 1", UK),
+        (TODO_EL_MUNDO, "XXXX", "XXXX - TODO EL MUNDO", None),
+        (ES5, "ES5", "ES5 - ESTE", RAIZ),
+        (ES51, "ES51", "ES51 - CATALUNA", ES5),
+        (ES52, "ES52", "ES52 - COMUNIDAD VALENCIANA", ES5),
+        (ES53, "ES53", "ES53 - ILLES BALEARS", ES5),
+    )
+    async with AsyncSessionLocal() as db:
+        for bdns_id, codigo, nombre, padre in nodos:
+            if await db.get(CatalogoBdns, ("region", bdns_id)) is None:
+                db.add(
+                    CatalogoBdns(
+                        tipo="region", bdns_id=bdns_id, codigo=codigo, descripcion=f"{MARCA_TEST}{nombre}",
+                        padre_bdns_id=padre,
+                    )  # fmt: skip
+                )
+        await db.commit()
+    servicio.limpiar_cache()
+
+
+async def test_exterior_macrorregiones_y_estatal(client_usuario: AsyncClient) -> None:
+    """Abroad (938040 UKZ, XXXX) is its own bucket; the ES5 macro rolls up; only region ES is national."""
+    await sembrar_catalogo_exterior()
+    m = marca()
+    await sembrar(m, region_ids=[UK, UKZ], nivel_administracion="estado")  # 938040-like: Spanish grant, project abroad
+    await sembrar(m, region_ids=[TODO_EL_MUNDO], nivel_administracion="local")
+    await sembrar(m, region_ids=[RAIZ], nivel_administracion="local")  # region España only: national
+    await sembrar(m, region_ids=[RAIZ, ES5])  # macro only: Cataluña, C. Valenciana and Illes Balears
+    await sembrar(m, region_ids=[RAIZ, ES5, ES52])  # the macro is just an ancestor: only C. Valenciana
+    await sembrar(m, region_ids=[UK, ES52])  # mixed: a Spanish grant, counted in its community
+    await sembrar(m, region_ids=[], nivel_administracion="local")  # no zone
+    datos = await mapa(client_usuario, m)
+
+    assert datos["total"] == 7
+    assert datos["exterior"] == {"total": 2, "abiertas": 2, "presupuesto": 200}
+    assert datos["estatal"]["total"] == 1  # the "estado" grant abroad is NOT national
+    assert datos["sin_zona"] == {"total": 1}
+    assert comunidad(datos, "C. Valenciana")["total"] == 3
+    assert comunidad(datos, "Cataluña")["total"] == 1
+    assert comunidad(datos, "Illes Balears")["total"] == 1
+    assert {c["nombre"] for c in datos["por_comunidad"]} == {"C. Valenciana", "Cataluña", "Illes Balears"}

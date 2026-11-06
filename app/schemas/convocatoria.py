@@ -187,3 +187,4 @@ class MapaConvocatorias(BaseModel):
     por_comunidad: list[MapaComunidad]
     estatal: MapaZonaEstatal
     sin_zona: MapaSinZona
+    exterior: MapaZonaEstatal  # project abroad (extra-regio, non-European, foreign); outside the other buckets
