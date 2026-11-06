@@ -9,7 +9,7 @@ globales, sin filtro por empresa. Nada de aquí llama a la BDNS.
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -35,6 +35,7 @@ from app.schemas.empresa import CodigoActividad
 from app.services import busqueda_convocatorias as busqueda
 from app.services import documentos as servicio_documentos
 from app.services import exportacion_convocatorias as exportacion
+from app.services import radar as servicio_radar
 from app.services.almacen_documentos import AlmacenDocumentos, DocumentoDemasiadoGrande
 from app.services.bdns_sync_cliente import ClienteBdnsSync
 from app.services.busqueda_convocatorias import FiltrosBusqueda, OrdenConvocatorias
@@ -47,6 +48,9 @@ MAX_TEXTO = 200
 MAX_LISTA = 50  # elementos por filtro de lista
 IdBdns = Annotated[int, Field(ge=0, le=2**31 - 1)]  # int32: fuera de rango Postgres daría 500
 CABECERA_FILTRO_IGNORADO = "X-Filtro-Actividad"
+# The listing also sorts by affinity (needs the company of the session); the export keeps the SQL-only orders.
+ORDENES_LISTADO = (*busqueda.ORDENES, "afinidad")
+OrdenListado = Literal[ORDENES_LISTADO]  # type: ignore[valid-type]
 
 
 async def filtros_busqueda(
@@ -114,14 +118,23 @@ FiltrosDep = Annotated[FiltrosBusqueda, Depends(filtros_busqueda)]
 @router.get("", response_model=Pagina[ConvocatoriaResumen], summary="Buscar convocatorias")
 async def listar(
     db: DbDep,
+    actual: UsuarioActualDep,
     filtros: FiltrosDep,
     paginacion: PaginacionDep,
     orden: Annotated[
-        OrdenConvocatorias,
-        Query(description="`relevancia` solo ordena si hay `q`. `cierre`: plazo más próximo primero."),
+        OrdenListado,
+        Query(
+            description="`relevancia` solo ordena si hay `q`. `cierre`: plazo más próximo primero. "
+            "`afinidad`: mayor afinidad con tu empresa primero (cada fila trae su `afinidad`)."
+        ),
     ] = "recientes",
 ) -> Pagina[ConvocatoriaResumen]:
-    total, filas = await busqueda.buscar(db, filtros, orden, offset=paginacion.offset, limit=paginacion.size)
+    if orden == "afinidad":
+        total, filas = await servicio_radar.buscar_por_afinidad(
+            db, filtros, actual.empresa_id, offset=paginacion.offset, limit=paginacion.size
+        )
+    else:
+        total, filas = await busqueda.buscar(db, filtros, orden, offset=paginacion.offset, limit=paginacion.size)
     return Pagina(
         items=[ConvocatoriaResumen.model_validate(f) for f in filas],
         total=total,

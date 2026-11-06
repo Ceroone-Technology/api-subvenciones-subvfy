@@ -81,6 +81,8 @@ class ConvocatoriaResumen(BaseModel):
     region_ids: list[int]
     tema: TemaConvocatoria
     gestiona_subvfy: bool
+    # Only with `orden=afinidad` (0-100, computed on the fly for the company of the session); otherwise `None`.
+    afinidad: int | None = None
 
 
 class DocumentoConvocatoria(BaseModel):

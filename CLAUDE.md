@@ -141,6 +141,13 @@ No se edita una migración ya publicada para meter esto: son pasos de operación
 - `EmpresaRead` añade esos campos más `intereses[]`, `perfil_completo_pct` y `perfil_pendiente[{codigo, etiqueta}]`. Completitud = 5 ítems de 20 % (actividad, tamaño+provincia, ≥3 intereses, facturación, proyecto), función pura en `app/services/perfil_empresa.py`.
 - `GET /empresas/me` (cualquier rol) y `GET /catalogos/intereses`. Editar sigue siendo `PATCH /empresas/{id}` (gestor o admin).
 
+### Afinidad y radar (N3)
+
+- **Puntuación pura y determinista** (`app/services/afinidad.py`, sin IA ni BD): CNAE 40, zona 20, tamaño/beneficiario 15, intereses vs `tema` 15, plazo 10. Cada bloque da `motivos[]` (solo afirmaciones ciertas) o `dudas[]`; un dato que falta en el perfil no suma y lo dice. **No se guarda nada**: se calcula al vuelo sobre un prefiltro SQL (`app/services/radar.py`, tope `MAX_CANDIDATAS`).
+- **Zona** (`app/services/zonas.py`, pura): el vocabulario es el del mapa del front (`and`, `ara`, ..., `ES` = estatal). La convocatoria se resuelve por los nodos NUTS-2 del catálogo (`catalogo_bdns.codigo` de 4 caracteres, `ES11`..`ES70`; Ceuta y Melilla no están en el mapa → desconocida). `empresa.ccaa`/`provincia` son texto libre: se normalizan por palabras clave (las del front) más las 50 provincias. Si se amplía el mapa, se cambian los dos lados a la vez.
+- `GET /radar` (cualquier rol, empresa del token): `min`, `tema` (repetible), `gestiona`, `limit` (1-200, 50); `{items, total}` con `total` = las que llegan a `min`. Solo abiertas; si la empresa tiene sección CNAE, parte de las de su sector o sin sector (mismo criterio que `para_mi_empresa`).
+- `GET /convocatorias?orden=afinidad` (solo el listado; la exportación no lo admite): mismos filtros y `total`, y cada fila trae `afinidad` (`null` con otros órdenes).
+
 **Gotcha de tests**: los tests de `tests/test_config.py` construyen su propio `Settings(_env_file=None)` y borran con `monkeypatch` las variables que inyectan docker compose y el CI; no usan el `settings` global, que ya se creó al importar la app. El resto de la suite saca el secreto del entorno del contenedor (`env_file: .env`) o del bloque `env:` del workflow, sin tocar `conftest.py`.
 
 **Gotcha de entorno**: `docker compose` inyecta el `.env` al **crear** el contenedor. Tras cambiar el `.env`, `docker compose up -d`; un `restart` sigue con los valores viejos.
