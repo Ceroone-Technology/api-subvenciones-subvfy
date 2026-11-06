@@ -26,8 +26,11 @@ para probarlo sin esperar.
 import asyncio
 import logging
 import random
+import re
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import date
 from types import TracebackType
 from typing import Any, Literal, NoReturn, Self
@@ -35,6 +38,7 @@ from typing import Any, Literal, NoReturn, Self
 import httpx
 
 from app.config import settings
+from app.services.almacen_documentos import DocumentoDemasiadoGrande
 from app.services.bdns_cliente import BdnsNoDisponible, PaginaBdns, _leer_pagina
 
 logger = logging.getLogger(__name__)
@@ -43,6 +47,9 @@ RUTA_BUSQUEDA = "/convocatorias/busqueda"
 RUTA_DETALLE = "/convocatorias"
 RUTA_ORGANOS = "/organos"
 RUTA_REGIONES = "/regiones"
+RUTA_DOCUMENTO = "/convocatorias/documentos"
+# Un reintento (dos intentos) para descargas: el usuario está esperando la respuesta.
+INTENTOS_DOCUMENTO = 2
 
 FORMATO_FECHA_BDNS = "%d/%m/%Y"
 USER_AGENT = "Subvfy-sync/1.0"
@@ -164,6 +171,7 @@ class ClienteBdnsSync:
         reloj: Callable[[], float] = time.monotonic,
         dormir: Callable[[float], Awaitable[None]] = asyncio.sleep,
         aleatorio: Callable[[], float] = random.random,
+        cubo: "_CuboDeTokens | None" = None,
     ) -> None:
         self._propio = cliente is None
         self._cliente = cliente or httpx.AsyncClient(
@@ -171,7 +179,8 @@ class ClienteBdnsSync:
             timeout=httpx.Timeout(TIMEOUT_LECTURA, connect=TIMEOUT_CONEXION),
             headers={"Accept": "application/json", "User-Agent": USER_AGENT},
         )
-        self._cubo = _CuboDeTokens(max(RPS_MIN, min(RPS_MAX, rps)), reloj, dormir)
+        # `cubo` permite compartir el límite entre clientes (las descargas de documentos de varios requests).
+        self._cubo = cubo or _CuboDeTokens(max(RPS_MIN, min(RPS_MAX, rps)), reloj, dormir)
         self._intentos = max(1, intentos)
         self._umbral = max(1, umbral_breaker)
         self._espera_max_total = max(0.0, espera_max_total)
@@ -270,6 +279,64 @@ class ClienteBdnsSync:
         self._fallos_seguidos = 0
         return cuerpo
 
+
+    # --- Documentos ---------------------------------------------------------
+
+    @asynccontextmanager
+    async def descargar_documento(self, id_documento: int, *, max_bytes: int) -> AsyncIterator["DescargaDocumento"]:
+        """Abre la descarga de un documento (flujo, no en memoria) respetando throttle y breaker.
+
+        Un solo reintento, y solo antes de recibir el primer byte; un 200 `text/html` (WAF) es
+        `BdnsNoDisponible`. Si `Content-Length` o el flujo superan `max_bytes` lanza
+        `DocumentoDemasiadoGrande`. Un corte a mitad de flujo sale como `BdnsNoDisponible`:
+        quien guarda (el almacén) no deja nada a medias.
+        """
+        if self.circuito_abierto:
+            raise CircuitoAbierto(f"Circuito abierto tras {self._umbral} fallos seguidos de la BDNS.")
+        parametros = {"idDocumento": str(id_documento), "vpd": self._vpd}
+        error: BdnsNoDisponible | None = None
+        for intento in range(1, INTENTOS_DOCUMENTO + 1):
+            await self._cubo.tomar()
+            self._peticiones += 1
+            transitorio = True
+            try:
+                contexto = self._cliente.stream("GET", RUTA_DOCUMENTO, params=parametros)
+                respuesta = await contexto.__aenter__()
+            except httpx.HTTPError as exc:
+                error = BdnsNoDisponible(f"No se pudo consultar la BDNS: {exc!r}.")
+            else:
+                estado = respuesta.status_code
+                tipo = respuesta.headers.get("content-type", "").lower()
+                if estado >= 400:
+                    error = BdnsNoDisponible(f"La BDNS respondió {estado}.", status=estado)
+                    transitorio = estado in ESTADOS_TRANSITORIOS
+                elif "html" in tipo:
+                    error = BdnsNoDisponible("La BDNS devolvió una página HTML en vez del documento.", status=estado)
+                else:
+                    try:
+                        declarado = int(respuesta.headers.get("content-length", "0"))
+                    except ValueError:
+                        declarado = 0
+                    if declarado > max_bytes:
+                        await contexto.__aexit__(None, None, None)
+                        self._fallos_seguidos = 0
+                        raise DocumentoDemasiadoGrande(f"El documento declara {declarado} bytes (máximo {max_bytes}).")
+                    self._fallos_seguidos = 0
+                    try:
+                        yield DescargaDocumento(
+                            mime=tipo.split(";")[0].strip() or None,
+                            nombre_archivo=_nombre_de_archivo(respuesta.headers.get("content-disposition")),
+                            contenido=_flujo_acotado(respuesta, max_bytes),
+                        )
+                    finally:
+                        await contexto.__aexit__(None, None, None)
+                    return
+                await contexto.__aexit__(None, None, None)
+            if not transitorio or intento == INTENTOS_DOCUMENTO:
+                break
+            await self._dormir(self._espera(intento, None))
+        assert error is not None
+        self._fallar(error)
     # --- Núcleo: throttle, reintentos, breaker -----------------------------
 
     async def _pedir(self, ruta: str, parametros: dict[str, str], *, vacio_si_no_existe: bool = False) -> Any:
@@ -356,3 +423,38 @@ def _leer_retry_after(respuesta: httpx.Response) -> float | None:
     except ValueError:
         return None
     return segundos if segundos >= 0 else None
+
+
+@dataclass(frozen=True)
+class DescargaDocumento:
+    mime: str | None
+    nombre_archivo: str | None
+    contenido: AsyncIterator[bytes]
+
+
+_NOMBRE_ARCHIVO = re.compile(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', re.IGNORECASE)
+
+
+def _nombre_de_archivo(cabecera: str | None) -> str | None:
+    """Nombre del archivo según la BDNS, reducido a su último tramo (nunca una ruta)."""
+    if not cabecera or not (m := _NOMBRE_ARCHIVO.search(cabecera)):
+        return None
+    nombre = m.group(1).strip().replace("\\", "/").rsplit("/", 1)[-1]
+    return nombre[:200] or None
+
+
+async def _flujo_acotado(respuesta: httpx.Response, max_bytes: int) -> AsyncIterator[bytes]:
+    total = 0
+    try:
+        async for trozo in respuesta.aiter_bytes():
+            total += len(trozo)
+            if total > max_bytes:
+                raise DocumentoDemasiadoGrande(f"El documento supera {max_bytes} bytes.")
+            yield trozo
+    except httpx.HTTPError as exc:
+        raise BdnsNoDisponible(f"Se cortó la descarga de la BDNS: {exc!r}.") from exc
+
+
+def nuevo_cubo(rps: float) -> _CuboDeTokens:
+    """Cubo de tokens reutilizable entre clientes (no depende de ningún event loop)."""
+    return _CuboDeTokens(max(RPS_MIN, min(RPS_MAX, rps)), time.monotonic, asyncio.sleep)

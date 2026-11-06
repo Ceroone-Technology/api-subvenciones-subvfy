@@ -35,6 +35,8 @@ from app.models import (
     AlertaEjecucionConvocatoria,
     CatalogoBdns,
     Convocatoria,
+    ConvocatoriaDocumento,
+    DocumentoAcceso,
     Empresa,
     Rol,
     SyncRun,
@@ -216,6 +218,19 @@ async def limpiar_datos_de_test() -> AsyncGenerator[None, None]:
                 | SyncRun.updated_by.in_(usuarios_firmantes)
             )
         )
+        # Documentos cacheados de convocatorias de prueba y sus accesos (FK sin cascada hacia
+        # convocatoria y usuario): antes que los usuarios y que las convocatorias.
+        docs_de_test = select(ConvocatoriaDocumento.id).where(
+            ConvocatoriaDocumento.convocatoria_id.in_(
+                select(Convocatoria.id).where(Convocatoria.codigo_bdns.like(f"{CODIGO_BDNS_PREFIJO_TEST}%"))
+            )
+        )
+        await db.execute(
+            delete(DocumentoAcceso).where(
+                DocumentoAcceso.documento_id.in_(docs_de_test) | DocumentoAcceso.usuario_id.in_(usuarios_firmantes)
+            )
+        )
+        await db.execute(delete(ConvocatoriaDocumento).where(ConvocatoriaDocumento.id.in_(docs_de_test)))
         # Las alertas no pueden esperar a la cascada del usuario: sus filtros
         # quedan a dos niveles (usuario -> alerta -> alerta_organo) y
         # Postgres comprueba su FK de auditoría created_by -> usuario antes de

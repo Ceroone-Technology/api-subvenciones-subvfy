@@ -23,3 +23,4 @@ boto3==1.43.100
 apscheduler==3.10.4
 # Cliente HTTP async para consultar la BDNS (y el que ya usan los tests).
 httpx==0.28.1
+openpyxl==3.1.5

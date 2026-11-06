@@ -10,6 +10,7 @@ from datetime import date
 import httpx
 import pytest
 
+from app.services.almacen_documentos import DocumentoDemasiadoGrande
 from app.services.bdns_cliente import BdnsNoDisponible
 from app.services.bdns_sync_cliente import CircuitoAbierto, ClienteBdnsSync, inferir_direccion, orden_de_fechas
 from tests.fixtures_bdns import cargar_fixture
@@ -594,3 +595,77 @@ def test_una_excepcion_inesperada_del_script_no_sale_con_el_codigo_del_veredicto
 
     assert codigo == script.SALIDA_ERROR_INESPERADO
     assert codigo not in (0, 1, 2, 3)
+
+
+# --- 11.1 Descarga de documentos ---------------------------------------------
+
+
+def pdf(cuerpo: bytes = b"%PDF-1.4 hola", **cabeceras: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        content=cuerpo,
+        headers={"content-type": "application/pdf", "content-disposition": 'attachment; filename="bases.pdf"'}
+        | cabeceras,
+    )
+
+
+async def descargar(
+    cliente: ClienteBdnsSync, id_doc: int = 7, max_bytes: int = 1000
+) -> tuple[bytes, str | None, str | None]:
+    async with cliente.descargar_documento(id_doc, max_bytes=max_bytes) as d:
+        return b"".join([c async for c in d.contenido]), d.mime, d.nombre_archivo
+
+
+async def test_descargar_documento_devuelve_el_flujo_y_los_metadatos() -> None:
+    cliente, servidor, _ = crear([pdf()])
+    datos, mime, nombre = await descargar(cliente)
+    assert (datos, mime, nombre) == (b"%PDF-1.4 hola", "application/pdf", "bases.pdf")
+    assert servidor.peticiones[0].url.params["idDocumento"] == "7"
+    assert cliente.peticiones == 1
+
+
+async def test_descargar_documento_comparte_el_cubo_de_tokens() -> None:
+    cliente, servidor, _ = crear([pdf()], rps=2.0)
+    await descargar(cliente)
+    await descargar(cliente)
+    assert servidor.instantes[1] - servidor.instantes[0] >= 0.5 - 1e-9
+
+
+async def test_descargar_documento_reintenta_una_vez() -> None:
+    cliente, servidor, reloj = crear([httpx.Response(503), pdf()])
+    datos, _, _ = await descargar(cliente)
+    assert datos == b"%PDF-1.4 hola"
+    assert len(servidor.peticiones) == 2
+    assert reloj.esperas  # esperó entre intentos
+
+
+async def test_descargar_documento_no_reintenta_mas_de_una_vez() -> None:
+    cliente, servidor, _ = crear([httpx.Response(503)])
+    with pytest.raises(BdnsNoDisponible):
+        await descargar(cliente)
+    assert len(servidor.peticiones) == 2
+
+
+async def test_descargar_documento_html_es_bdns_no_disponible() -> None:
+    cliente, _, _ = crear([HTML_WAF])
+    with pytest.raises(BdnsNoDisponible):
+        await descargar(cliente)
+
+
+async def test_descargar_documento_404_es_bdns_no_disponible_sin_reintento() -> None:
+    cliente, servidor, _ = crear([httpx.Response(404)])
+    with pytest.raises(BdnsNoDisponible):
+        await descargar(cliente)
+    assert len(servidor.peticiones) == 1
+
+
+async def test_descargar_documento_por_encima_del_maximo() -> None:
+    cliente, _, _ = crear([pdf(b"x" * 50)])
+    with pytest.raises(DocumentoDemasiadoGrande):
+        await descargar(cliente, max_bytes=10)
+
+
+async def test_descargar_documento_content_length_excesivo_ni_se_lee() -> None:
+    cliente, _, _ = crear([pdf(b"x" * 5, **{"content-length": "99999"})])
+    with pytest.raises(DocumentoDemasiadoGrande):
+        await descargar(cliente, max_bytes=10)

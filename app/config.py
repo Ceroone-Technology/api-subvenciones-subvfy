@@ -102,6 +102,11 @@ class Settings(BaseSettings):
     sync_max_retiradas_pct: float = 0.05
     sync_backfill_meses: int = 24
 
+    # Caché de documentos de la BDNS. `s3` queda reservado al Hito 7.
+    documentos_backend: str = "local"
+    documentos_ruta: str = "/app/almacen"
+    documentos_max_mb: int = 20
+
     # Nivel de log de la aplicación. Sin esto, los INFO de app.* no se ven:
     # uvicorn solo configura sus propios loggers.
     log_level: str = "INFO"

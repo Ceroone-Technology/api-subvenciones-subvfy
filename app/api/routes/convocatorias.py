@@ -7,14 +7,16 @@ globales, sin filtro por empresa. Nada de aquí llama a la BDNS.
 **Orden de declaración**: `/resumen` va antes de `/{codigo_bdns}`, o la segunda lo capturaría.
 """
 
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Annotated
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import Field, StringConstraints
 
-from app.api.deps import DbDep, PaginacionDep
+from app.api.deps import DbDep, PaginacionDep, UsuarioActualDep
 from app.core.permisos import usuario_actual
 from app.schemas.common import Pagina
 from app.schemas.convocatoria import (
@@ -25,8 +27,13 @@ from app.schemas.convocatoria import (
     ResumenConvocatorias,
 )
 from app.services import busqueda_convocatorias as busqueda
+from app.services import documentos as servicio_documentos
+from app.services import exportacion_convocatorias as exportacion
+from app.services.almacen_documentos import AlmacenDocumentos, DocumentoDemasiadoGrande
+from app.services.bdns_sync_cliente import ClienteBdnsSync
 from app.services.busqueda_convocatorias import FiltrosBusqueda, OrdenConvocatorias
 from app.services.convocatoria_estado import EstadoConvocatoria
+from app.services.exportacion_convocatorias import FormatoExportacion
 
 router = APIRouter(prefix="/convocatorias", tags=["convocatorias"], dependencies=[Depends(usuario_actual)])
 
@@ -91,6 +98,23 @@ async def resumen(db: DbDep) -> ResumenConvocatorias:
     return ResumenConvocatorias.model_validate(await busqueda.resumen(db))
 
 
+@router.get("/export", summary="Exportar el resultado filtrado a CSV o XLSX")
+async def exportar(
+    db: DbDep,
+    filtros: FiltrosDep,
+    formato: FormatoExportacion,
+    orden: Annotated[OrdenConvocatorias, Query()] = "recientes",
+) -> Response:
+    """Mismos filtros que el listado, tope de 5.000 filas, sin llamar a la BDNS."""
+    datos = await exportacion.filas(db, filtros, orden)
+    if formato == "csv":
+        contenido, tipo = exportacion.a_csv(datos), exportacion.MIME_CSV
+    else:
+        contenido, tipo = exportacion.a_xlsx(datos), exportacion.MIME_XLSX
+    nombre = f"convocatorias-{datetime.now(UTC):%Y%m%d}.{formato}"
+    return Response(contenido, media_type=tipo, headers={"Content-Disposition": f'attachment; filename="{nombre}"'})
+
+
 @router.get("/{codigo_bdns}", response_model=ConvocatoriaDetalle, summary="Ficha de una convocatoria")
 async def detalle(codigo_bdns: str, db: DbDep) -> ConvocatoriaDetalle:
     encontrada = await busqueda.obtener(db, codigo_bdns)
@@ -111,8 +135,77 @@ async def detalle(codigo_bdns: str, db: DbDep) -> ConvocatoriaDetalle:
         objetivos=ficha.get("objetivos", []),
         regiones=ficha.get("regiones", []),
         bases_reguladoras=ficha.get("bases_reguladoras"),
-        # Sin `url` hasta que el PR de documentos añada la ruta propia: nunca se expone un host de la BDNS.
-        documentos=[DocumentoConvocatoria(**doc) for doc in ficha.get("documentos", [])],
+        # `url` es siempre la ruta propia (nunca un host de la BDNS).
+        documentos=[
+            DocumentoConvocatoria(**doc, url=f"/convocatorias/{codigo_bdns}/documentos/{doc['id']}")
+            for doc in ficha.get("documentos", [])
+        ],
         retirada=conv.removed_at is not None,
         ultima_actualizacion=conv.detalle_sync_at,
     )
+
+
+ClienteDocumentosDep = Annotated[ClienteBdnsSync, Depends(servicio_documentos.cliente_bdns)]
+AlmacenDep = Annotated[AlmacenDocumentos, Depends(servicio_documentos.almacen)]
+
+
+@router.get(
+    "/{codigo_bdns}/documentos/{id_documento}",
+    summary="Descargar un documento de la convocatoria",
+    response_class=StreamingResponse,
+    responses={
+        404: {"description": "Convocatoria o documento desconocidos."},
+        413: {"description": "El documento supera el máximo permitido (`documento_demasiado_grande`)."},
+        503: {"description": "La BDNS no está disponible y el documento aún no está en nuestro almacén."},
+    },
+)
+async def descargar_documento(
+    codigo_bdns: str,
+    id_documento: IdBdns,
+    db: DbDep,
+    actual: UsuarioActualDep,
+    almacen: AlmacenDep,
+    cliente: ClienteDocumentosDep,
+) -> Response:
+    """La primera vez se baja de la BDNS (con límite de ritmo) y se guarda; después sale de nuestro almacén."""
+    try:
+        listo = await servicio_documentos.servir(
+            db,
+            usuario_id=actual.id,
+            codigo_bdns=codigo_bdns,
+            id_documento=id_documento,
+            almacen_documentos=almacen,
+            cliente=cliente,
+        )
+    except servicio_documentos.DocumentoNoEncontrado:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Documento no encontrado.") from None
+    except DocumentoDemasiadoGrande:
+        raise HTTPException(
+            status.HTTP_413_CONTENT_TOO_LARGE,
+            detail={
+                "codigo": "documento_demasiado_grande",
+                "mensaje": "El documento supera el tamaño máximo permitido.",
+            },
+        ) from None
+    except servicio_documentos.BdnsDocumentoNoDisponible:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No se pudo obtener el documento ahora. Inténtalo de nuevo más tarde.",
+        ) from None
+    if (temporal := almacen.url_temporal(listo.clave)) is not None:
+        return RedirectResponse(temporal, status_code=status.HTTP_302_FOUND)
+    return StreamingResponse(
+        almacen.abrir(listo.clave),
+        media_type=listo.mime,
+        headers={
+            "Content-Disposition": _content_disposition(listo.nombre),
+            "Content-Length": str(listo.tamano),
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
+def _content_disposition(nombre: str) -> str:
+    ascii_ = nombre.encode("ascii", "replace").decode().replace("?", "_")
+    return f"attachment; filename=\"{ascii_}\"; filename*=UTF-8''{quote(nombre)}"

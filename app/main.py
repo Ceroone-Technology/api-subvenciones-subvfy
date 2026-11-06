@@ -11,7 +11,18 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import admin_sync, alertas, auth, catalogos, convocatorias, empresas, favoritos, roles, usuarios
+from app.api.routes import (
+    admin_documentos,
+    admin_sync,
+    alertas,
+    auth,
+    catalogos,
+    convocatorias,
+    empresas,
+    favoritos,
+    roles,
+    usuarios,
+)
 from app.config import settings
 from app.core.scheduler import iniciar_scheduler, parar_scheduler
 
@@ -48,6 +59,8 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Sin esto el navegador oculta el nombre de archivo de las descargas (export y documentos).
+    expose_headers=["Content-Disposition"],
 )
 
 app.include_router(auth.router)
@@ -57,6 +70,7 @@ app.include_router(usuarios.router)
 app.include_router(favoritos.router)
 app.include_router(alertas.router)
 app.include_router(admin_sync.router)
+app.include_router(admin_documentos.router)
 app.include_router(convocatorias.router)
 app.include_router(catalogos.router)
 

@@ -210,7 +210,7 @@ async def test_lista_de_beneficiarios_acotada(client_usuario: AsyncClient) -> No
 # --- Detail and summary --------------------------------------------------------
 
 
-async def test_detalle_lista_documentos_sin_url_hasta_que_exista_la_ruta(client_usuario: AsyncClient) -> None:
+async def test_detalle_lista_documentos_con_la_url_propia(client_usuario: AsyncClient) -> None:
     m = marca()
     codigo = await sembrar(
         m,
@@ -231,7 +231,7 @@ async def test_detalle_lista_documentos_sin_url_hasta_que_exista_la_ruta(client_
     cuerpo = (await client_usuario.get(f"/convocatorias/{codigo}")).json()
     assert cuerpo["codigo_bdns"] == codigo and cuerpo["beneficiarios"] == ["PYME"]
     assert cuerpo["instrumentos"] == ["Subvención"] and cuerpo["regiones"] == ["ES12 - ASTURIAS"]
-    assert all("url" not in d for d in cuerpo["documentos"])  # la ruta propia llega con el PR de documentos
+    assert [d["url"] for d in cuerpo["documentos"]] == [f"/convocatorias/{codigo}/documentos/{i}" for i in (11, 12)]
     assert [d["nombre"] for d in cuerpo["documentos"]] == ["bases.pdf", "anexo.pdf"]
 
 

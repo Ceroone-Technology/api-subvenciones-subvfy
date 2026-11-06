@@ -13,6 +13,8 @@ from app.models.analisis_ia import AnalisisIA
 from app.models.catalogo_bdns import CatalogoBdns
 from app.models.conversacion_asistente import ConversacionAsistente
 from app.models.convocatoria import Convocatoria
+from app.models.convocatoria_documento import ConvocatoriaDocumento
+from app.models.documento_acceso import DocumentoAcceso
 from app.models.empresa import Empresa
 from app.models.empresa_palabra_clave import EmpresaPalabraClave
 from app.models.favorito import Favorito
@@ -30,6 +32,8 @@ __all__ = [
     "AnalisisIA",
     "CatalogoBdns",
     "Convocatoria",
+    "ConvocatoriaDocumento",
+    "DocumentoAcceso",
     "ConversacionAsistente",
     "Empresa",
     "EmpresaPalabraClave",
