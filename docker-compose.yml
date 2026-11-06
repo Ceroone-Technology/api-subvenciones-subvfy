@@ -32,6 +32,9 @@ services:
       - ./app:/app/app
       - ./alembic:/app/alembic
       - ./tests:/app/tests
+      - ./pyproject.toml:/app/pyproject.toml
+      - subvfy_documentos:/app/almacen
 
 volumes:
   subvfy_pgdata:
+  subvfy_documentos:

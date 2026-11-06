@@ -5,13 +5,15 @@ permisos, caché de convocatoria y join. Los tests van de punta a punta a
 propósito.
 """
 
+from datetime import date
+
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 
 from app.database import AsyncSessionLocal
 from app.models import Convocatoria
-from tests.conftest import Sesion, codigo_bdns_de_prueba, crear_sesion_en_bd
+from tests.conftest import Sesion, codigo_bdns_de_prueba, crear_convocatoria_en_bd, crear_sesion_en_bd
 
 
 def _convocatoria(codigo: str, **extra) -> dict:
@@ -87,27 +89,6 @@ async def test_marcar_dos_veces_la_misma_convocatoria(client_gestor: AsyncClient
     repetido = await client_gestor.post("/favoritos", json={"convocatoria": _convocatoria(codigo)})
     assert repetido.status_code == 409
     assert codigo in repetido.json()["detail"]
-
-
-@pytest.mark.asyncio
-async def test_un_guardado_parcial_no_borra_datos_ya_cacheados(client_gestor: AsyncClient) -> None:
-    """Marcar desde el listado de resultados (ficha incompleta) no puede
-    machacar lo que ya se había sincronizado de la ficha completa."""
-    codigo = codigo_bdns_de_prueba()
-    await client_gestor.post(
-        "/favoritos",
-        json={"convocatoria": _convocatoria(codigo, organo_convocante="Ministerio de Industria")},
-    )
-    await client_gestor.delete(f"/favoritos/{codigo}")
-
-    # Segunda vez, con la ficha mínima que trae el listado.
-    respuesta = await client_gestor.post(
-        "/favoritos", json={"convocatoria": {"codigo_bdns": codigo, "titulo": "Título abreviado"}}
-    )
-    assert respuesta.status_code == 201
-    convocatoria = respuesta.json()["convocatoria"]
-    assert convocatoria["titulo"] == "Título abreviado"  # sí se actualiza lo que viene
-    assert convocatoria["organo_convocante"] == "Ministerio de Industria"  # no se pierde lo que no
 
 
 @pytest.mark.asyncio
@@ -252,4 +233,65 @@ async def test_nivel_administracion_invalido(client_gestor: AsyncClient) -> None
 @pytest.mark.asyncio
 async def test_favoritos_exige_token(client: AsyncClient) -> None:
     assert (await client.get("/favoritos")).status_code == 401
-    assert (await client.post("/favoritos", json={})).status_code == 401
+    assert (await client.post("/favoritos", json={})).status_code == 401@pytest.mark.asyncio
+async def test_un_usuario_no_puede_sobrescribir_una_convocatoria_ya_cacheada(
+    client_usuario: AsyncClient,
+) -> None:
+    """SECURITY: the grants table is shared by every company; marking a favourite only seeds a missing row."""
+    original = await crear_convocatoria_en_bd(
+        "Titulo sincronizado",
+        organo_convocante="Organo real",
+        administracion="Admin real",
+        url_portal_oficial="https://www.infosubvenciones.es/real",
+        fecha_registro=date(2026, 1, 15),
+    )
+    codigo = original.codigo_bdns
+    respuesta = await client_usuario.post(
+        "/favoritos",
+        json={
+            "convocatoria": _convocatoria(
+                codigo,
+                titulo="Titulo falso",
+                organo_convocante="Organo falso",
+                administracion="Admin falsa",
+                url_portal_oficial="https://phishing.example.com/",
+                fecha_registro="2020-01-01",
+            )
+        },
+    )
+    assert respuesta.status_code == 201, respuesta.text
+    async with AsyncSessionLocal() as db:
+        fila = (await db.execute(select(Convocatoria).where(Convocatoria.id == original.id))).scalar_one()
+    assert fila.titulo == "Titulo sincronizado"
+    assert fila.organo_convocante == "Organo real"
+    assert fila.administracion == "Admin real"
+    assert fila.url_portal_oficial == "https://www.infosubvenciones.es/real"
+    assert fila.fecha_registro == date(2026, 1, 15)
+    assert fila.updated_at == original.updated_at
+
+
+@pytest.mark.asyncio
+async def test_la_fila_nueva_no_guarda_la_url_del_cliente(client_usuario: AsyncClient) -> None:
+    """The sync never fills the portal URL, so a client link on a seeded row would stay forever."""
+    codigo = codigo_bdns_de_prueba()
+    respuesta = await client_usuario.post(
+        "/favoritos",
+        json={"convocatoria": _convocatoria(codigo, url_portal_oficial="https://phishing.example.com/")},
+    )
+    assert respuesta.status_code == 201, respuesta.text
+    async with AsyncSessionLocal() as db:
+        fila = (await db.execute(select(Convocatoria).where(Convocatoria.codigo_bdns == codigo))).scalar_one()
+    assert fila.url_portal_oficial is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", ["javascript:alert(1)", "data:text/html,x", "ftp://x.example.com/", "//x.example.com"])
+async def test_la_url_del_cliente_debe_ser_http_o_https(client_usuario: AsyncClient, url: str) -> None:
+    respuesta = await client_usuario.post(
+        "/favoritos",
+        json={"convocatoria": _convocatoria(codigo_bdns_de_prueba(), url_portal_oficial=url)},
+    )
+    assert respuesta.status_code == 422
+
+
+

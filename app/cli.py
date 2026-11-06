@@ -22,9 +22,14 @@ import sys
 
 from sqlalchemy import select
 
-from app.core.security import PASSWORD_MIN_LONGITUD, hashear_password
+from app.core.security import PASSWORD_MAX_BYTES, PASSWORD_MIN_LONGITUD, hashear_password
 from app.database import AsyncSessionLocal
 from app.models import Empresa, Rol, Usuario
+from app.services.clasificacion import ResultadoRecalculo, recalcular
+from app.services.cnae_relleno import ejecutar_relleno
+from app.services.cuentas_prueba import CuentasRechazadas, Resultado, crear_cuentas
+from app.services.seed_prueba import SeedRechazado, sembrar
+from app.services.sync_bdns import ejecutar_sync
 
 
 async def crear_admin(
@@ -82,6 +87,71 @@ def _pedir_password() -> str:
     return password
 
 
+def _sync_bdns(args: argparse.Namespace) -> None:
+    resultado = asyncio.run(
+        ejecutar_sync(
+            modo="backfill" if args.backfill else "incremental", meses=args.meses, max_minutos=args.max_minutos
+        )
+    )
+    if resultado is None:
+        print("Sync BDNS: locked, ya hay otro run en curso.")
+        return
+    print(f"Sync BDNS: run {resultado.run_id} terminó en estado {resultado.estado}.")
+    if resultado.estado == "failed":
+        raise SystemExit(1)
+
+
+def _rellenar_cnae(args: argparse.Namespace) -> None:
+    r = asyncio.run(ejecutar_relleno(limite=args.limite))
+    print(f"CNAE: {r.actualizadas} actualizadas, {r.sin_seccion} sin sección, {r.errores} errores.")
+    if r.interrumpido:
+        print("La BDNS no responde (circuito abierto): repite el comando más tarde.")
+        raise SystemExit(1)
+
+
+async def _recalcular_clasificacion() -> ResultadoRecalculo:
+    async with AsyncSessionLocal() as db:
+        return await recalcular(db)
+
+
+def _recalcular(_: argparse.Namespace) -> None:
+    r = asyncio.run(_recalcular_clasificacion())
+    print(f"Clasificación: {r.total} convocatorias, {r.cambiadas} cambiadas, {r.gestionadas} gestionadas por Subvfy.")
+    for tema, n in sorted(r.por_tema.items()):
+        print(f"  {tema}: {n}")
+
+
+async def _seed_prueba(email: str) -> list[str]:
+    async with AsyncSessionLocal() as db:
+        return (await sembrar(db, email)).lineas
+
+
+def _seed(args: argparse.Namespace) -> None:
+    try:
+        lineas = asyncio.run(_seed_prueba(args.email))
+    except SeedRechazado as exc:
+        raise SystemExit(str(exc)) from exc
+    print("seed-prueba terminado:")
+    for linea in lineas:
+        print(f"  - {linea}")
+
+
+async def _crear_cuentas_prueba(email: str) -> Resultado:
+    async with AsyncSessionLocal() as db:
+        return await crear_cuentas(db, email)
+
+
+def _cuentas_prueba(args: argparse.Namespace) -> None:
+    try:
+        r = asyncio.run(_crear_cuentas_prueba(args.email))
+    except CuentasRechazadas as exc:
+        raise SystemExit(str(exc)) from exc
+    print(f"crear-cuentas-prueba terminado (empresa {r.empresa}, {r.tarjetas_asignadas} tarjeta(s) del usuario):")
+    print("Las contraseñas se muestran solo ahora; repite el comando para generar otras.")
+    for c in r.cuentas:
+        print(f"  {c.rol}: {c.email}  contraseña: {c.password}  ({'creada' if c.creada else 'reiniciada'})")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m app.cli", description=__doc__)
     subcomandos = parser.add_subparsers(dest="comando", required=True)
@@ -97,10 +167,55 @@ def main(argv: list[str] | None = None) -> None:
         help="Si se omite, se pide por consola (recomendado: no queda en el historial del shell).",
     )
 
+    sync = subcomandos.add_parser("sync-bdns", help="Sincroniza la BDNS con la base local.")
+    sync.add_argument("--backfill", action="store_true", help="Carga histórica (reanudable).")
+    sync.add_argument("--meses", type=int, help="Meses hacia atrás del backfill (por defecto SYNC_BACKFILL_MESES).")
+    sync.add_argument("--max-minutos", type=int, help="Caja de tiempo del run (por defecto SYNC_MAX_MINUTOS).")
+
+    cnae = subcomandos.add_parser("rellenar-cnae", help="Rellena las secciones CNAE de convocatorias ya cacheadas.")
+    cnae.add_argument("--limite", type=int, default=500, help="Convocatorias a procesar (1 petición cada una).")
+
+    subcomandos.add_parser(
+        "recalcular-clasificacion",
+        help="Recalcula tema y gestiona_subvfy de todas las convocatorias (sin llamar a la BDNS).",
+    )
+
+    semilla = subcomandos.add_parser(
+        "seed-prueba",
+        help="SOLO DESARROLLO: rellena la cuenta de un usuario con datos de prueba realistas (idempotente).",
+    )
+    semilla.add_argument("--email", required=True, help="Email del usuario cuya cuenta se rellena.")
+
+    cuentas = subcomandos.add_parser(
+        "crear-cuentas-prueba",
+        help="SOLO DESARROLLO: crea un gestor y un usuario de prueba en la empresa de un usuario (idempotente).",
+    )
+    cuentas.add_argument("--email", default="santiago.marin@ceroone.com", help="Usuario cuya empresa se usa.")
+
     args = parser.parse_args(argv)
+    if args.comando == "crear-cuentas-prueba":
+        _cuentas_prueba(args)
+        return
+    if args.comando == "seed-prueba":
+        _seed(args)
+        return
+    if args.comando == "recalcular-clasificacion":
+        _recalcular(args)
+        return
+    if args.comando == "sync-bdns":
+        _sync_bdns(args)
+        return
+    if args.comando == "rellenar-cnae":
+        _rellenar_cnae(args)
+        return
     password = args.password or _pedir_password()
     if len(password) < PASSWORD_MIN_LONGITUD:
         raise SystemExit(f"La contraseña debe tener al menos {PASSWORD_MIN_LONGITUD} caracteres.")
+    if len(password.encode("utf-8")) > PASSWORD_MAX_BYTES:
+        raise SystemExit(
+            f"La contraseña no puede ocupar más de {PASSWORD_MAX_BYTES} bytes en UTF-8 "
+            "(las letras con tilde y la ñ ocupan dos)."
+        )
 
     asyncio.run(
         crear_admin(

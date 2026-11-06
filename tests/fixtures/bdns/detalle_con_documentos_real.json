@@ -1,0 +1,67 @@
+{
+  "id": 1125744,
+  "organo": {
+    "nivel1": "AUTONOMICA",
+    "nivel2": "ANDALUCÍA",
+    "nivel3": "CONSEJERÍA DE FOMENTO ARTICULACIÓN DEL TERRITORIO Y VIVIENDA"
+  },
+  "sedeElectronica": null,
+  "codigoBDNS": "924183",
+  "fechaRecepcion": "2026-08-07",
+  "instrumentos": [
+    {
+      "descripcion": "SUBVENCIÓN Y ENTREGA DINERARIA SIN CONTRAPRESTACIÓN "
+    }
+  ],
+  "tipoConvocatoria": "Concesión directa - instrumental",
+  "presupuestoTotal": 25838818,
+  "mrr": true,
+  "descripcion": "Subv. Directa Excepc. Convenio Público NGP6. 691viv.SEVILLA. FIBES",
+  "descripcionLeng": null,
+  "tiposBeneficiarios": [
+    {
+      "descripcion": "PERSONAS JURÍDICAS QUE NO DESARROLLAN ACTIVIDAD ECONÓMICA"
+    }
+  ],
+  "sectores": [
+    {
+      "descripcion": "Actividades inmobiliarias por cuenta propia y promoción inmobiliaria",
+      "codigo": "68.1"
+    }
+  ],
+  "regiones": [
+    {
+      "descripcion": "ES61 - ANDALUCIA"
+    }
+  ],
+  "descripcionFinalidad": "Acceso a la vivienda y fomento de la edificación",
+  "descripcionBasesReguladoras": "Conv. Público. Subv. Directa Excepc. NGP6. 691 viv.SEVILLA. FIBES",
+  "urlBasesReguladoras": "https://www.boe.es/buscar/doc.php?id=BOE-A-2021-16233",
+  "sePublicaDiarioOficial": false,
+  "abierto": false,
+  "fechaInicioSolicitud": null,
+  "fechaFinSolicitud": null,
+  "textInicio": "Sin plazo de solicitur",
+  "textFin": "Sin plazo de solicitud",
+  "ayudaEstado": null,
+  "urlAyudaEstado": null,
+  "fondos": [
+    {
+      "descripcion": "MRR - MECANISMO DE RECUPERACIÓN Y RESILIENCIA"
+    }
+  ],
+  "reglamento": null,
+  "objetivos": [],
+  "sectoresProductos": [],
+  "documentos": [
+    {
+      "id": 1507071,
+      "descripcion": "Texto en castellano de la convocatoria",
+      "nombreFic": "TextoConvocatoria.pdf",
+      "long": 412269,
+      "datMod": "2026-08-07",
+      "datPublicacion": "2026-08-07"
+    }
+  ],
+  "anuncios": []
+}

@@ -4,16 +4,64 @@ Arranque local: `uvicorn app.main:app --reload`
 Docs interactivas (OpenAPI): http://localhost:8000/docs
 """
 
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import auth, empresas, favoritos, roles, usuarios
+from app.api.routes import (
+    admin_clientes,
+    admin_documentos,
+    admin_gestion,
+    admin_sync,
+    alertas,
+    auth,
+    calendario,
+    catalogos,
+    convocatorias,
+    descartes,
+    direcciones,
+    empresas,
+    favoritos,
+    inicio,
+    preferencias_aviso,
+    radar,
+    roles,
+    seguimiento,
+    usuarios,
+)
 from app.config import settings
+from app.core.errores import crear_manejador_errores, cuenta_no_operativa_handler
+from app.core.permisos import CuentaNoOperativa
+from app.core.scheduler import iniciar_scheduler, parar_scheduler
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Arranca el motor de alertas al levantar la app y lo para al apagarla.
+
+    Solo si `SCHEDULER_HABILITADO`. Los tests usan httpx + ASGITransport, que
+    no dispara el lifespan, así que ahí no arranca nunca.
+    """
+    # uvicorn solo configura sus loggers, así que sin esto los INFO de la
+    # app (motor de alertas incluido) no saldrían por la salida estándar.
+    logging.basicConfig(
+        level=settings.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    scheduler = iniciar_scheduler()
+    try:
+        yield
+    finally:
+        await parar_scheduler(scheduler)
+
 
 app = FastAPI(
     title="Subvfy API",
     description="API de app-subvenciones-subvfy: favoritos, alertas, autenticación y análisis con IA.",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -22,14 +70,34 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Sin esto el navegador oculta el nombre de archivo de las descargas (export y documentos).
+    expose_headers=["Content-Disposition", "X-Filas-Exportadas", "X-Filas-Total", "X-Export-Truncado"],
 )
+
+# Va a `ServerErrorMiddleware`, por fuera del CORS: el manejador añade él mismo las cabeceras.
+app.add_exception_handler(Exception, crear_manejador_errores(settings.cors_origins_list))
+app.add_exception_handler(CuentaNoOperativa, cuenta_no_operativa_handler)
 
 app.include_router(auth.router)
 app.include_router(roles.router)
 app.include_router(empresas.router)
 app.include_router(usuarios.router)
 app.include_router(favoritos.router)
+app.include_router(seguimiento.router)
+app.include_router(calendario.router)
+app.include_router(preferencias_aviso.router)
+app.include_router(direcciones.router)
+app.include_router(alertas.router)
+app.include_router(admin_sync.router)
+app.include_router(admin_documentos.router)
+app.include_router(admin_gestion.router)
+app.include_router(admin_clientes.router)
+app.include_router(convocatorias.router)
+app.include_router(radar.router)
+app.include_router(descartes.router)
+app.include_router(inicio.router)
+app.include_router(catalogos.router)
 
-# Los routers de negocio restantes (alertas, análisis IA)
+# Los routers de negocio restantes (análisis IA)
 # se registran aquí a medida que se construyen, uno por Funcionalidad del
 # backlog (api-hitos-funcionalidades-tareas-subvfy.docx).

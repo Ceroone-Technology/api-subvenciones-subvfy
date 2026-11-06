@@ -1,4 +1,4 @@
-from sqlalchemy import ForeignKey, Integer, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, Integer, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -11,7 +11,12 @@ class AlertaOrgano(Base, AuditMixin):
     no una tabla propia)."""
 
     __tablename__ = "alerta_organo"
-    __table_args__ = (UniqueConstraint("alerta_id", "organo_bdns_id", name="uq_alerta_organo"),)
+    __table_args__ = (
+        UniqueConstraint("alerta_id", "organo_bdns_id", name="uq_alerta_organo"),
+        # El UNIQUE ya indexa por alerta_id; este cubre la búsqueda inversa
+        # del motor de alertas: qué alertas vigilan un órgano concreto.
+        Index("ix_alerta_organo_organo", "organo_bdns_id"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     alerta_id: Mapped[int] = mapped_column(ForeignKey("alerta.id", ondelete="CASCADE"), nullable=False)

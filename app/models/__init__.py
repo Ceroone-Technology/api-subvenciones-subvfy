@@ -4,19 +4,31 @@ autogenerate los necesita importados, no solo definidos en sus archivos).
 Implementan, tabla por tabla, el esquema ya diseñado en schema-subvfy.sql.
 """
 
+from app.models.admin_lectura_cliente import AdminLecturaCliente
 from app.models.alerta import Alerta
 from app.models.alerta_ejecucion import AlertaEjecucion
 from app.models.alerta_ejecucion_convocatoria import AlertaEjecucionConvocatoria
 from app.models.alerta_organo import AlertaOrgano
 from app.models.alerta_region import AlertaRegion
 from app.models.analisis_ia import AnalisisIA
-from app.models.convocatoria import Convocatoria
+from app.models.catalogo_bdns import CatalogoBdns
 from app.models.conversacion_asistente import ConversacionAsistente
+from app.models.convocatoria import Convocatoria
+from app.models.convocatoria_documento import ConvocatoriaDocumento
+from app.models.descarte import Descarte
+from app.models.documento_acceso import DocumentoAcceso
 from app.models.empresa import Empresa
 from app.models.empresa_palabra_clave import EmpresaPalabraClave
+from app.models.exportacion_log import ExportacionLog
 from app.models.favorito import Favorito
+from app.models.gestion_excepcion import GestionExcepcion
+from app.models.interes import EmpresaInteres, Interes
 from app.models.mensaje_asistente import MensajeAsistente
+from app.models.preferencia_aviso import PreferenciaAviso
 from app.models.rol import Rol
+from app.models.sector_actividad import SectorActividad
+from app.models.seguimiento import Seguimiento, SeguimientoEvento, SeguimientoTarea
+from app.models.sync_run import SyncRun
 from app.models.usuario import Usuario
 
 __all__ = [
@@ -26,12 +38,27 @@ __all__ = [
     "AlertaOrgano",
     "AlertaRegion",
     "AnalisisIA",
+    "CatalogoBdns",
     "Convocatoria",
+    "ConvocatoriaDocumento",
+    "AdminLecturaCliente",
+    "Descarte",
+    "ExportacionLog",
+    "DocumentoAcceso",
     "ConversacionAsistente",
     "Empresa",
+    "EmpresaInteres",
     "EmpresaPalabraClave",
     "Favorito",
+    "GestionExcepcion",
+    "Interes",
     "MensajeAsistente",
+    "PreferenciaAviso",
     "Rol",
+    "SectorActividad",
+    "Seguimiento",
+    "SeguimientoEvento",
+    "SeguimientoTarea",
+    "SyncRun",
     "Usuario",
 ]

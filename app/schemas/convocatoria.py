@@ -9,12 +9,16 @@ es "guárdate esta copia de lo que acabo de leer en la BDNS".
 
 from datetime import date, datetime
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.models.convocatoria import NIVELES_ADMINISTRACION
+from app.models.convocatoria import NIVELES_ADMINISTRACION, TEMAS
+from app.services.convocatoria_estado import EstadoConvocatoria
 
-NivelAdministracion = Literal[NIVELES_ADMINISTRACION]
+# Literal[tupla] funciona en runtime pero mypy no lo acepta (ver CLAUDE.md): de ahí el ignore.
+NivelAdministracion = Literal[NIVELES_ADMINISTRACION]  # type: ignore[valid-type]
+TemaConvocatoria = Literal[TEMAS]  # type: ignore[valid-type]
 CodigoBdns = Annotated[str, Field(min_length=1, max_length=30)]
 
 
@@ -36,6 +40,21 @@ class ConvocatoriaUpsert(BaseModel):
     url_portal_oficial: str | None = Field(default=None, max_length=500)
     financiada_mrr: bool | None = None
 
+    @field_validator("url_portal_oficial")
+    @classmethod
+    def _url_http(cls, valor: str | None) -> str | None:
+        """Only absolute http(s) links with a host: the value ends up as a clickable link for every company."""
+        if valor is None:
+            return None
+        try:
+            partes = urlsplit(valor.strip())
+            ok = partes.scheme.lower() in ("http", "https") and bool(partes.hostname)
+        except ValueError:
+            ok = False
+        if not ok or any(c.isspace() or ord(c) < 32 for c in valor.strip()):
+            raise ValueError("La URL debe ser una dirección http:// o https:// completa.")
+        return valor.strip()
+
 
 class ConvocatoriaRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -50,3 +69,122 @@ class ConvocatoriaRead(BaseModel):
     url_portal_oficial: str | None
     financiada_mrr: bool
     sincronizado_at: datetime
+
+
+# --- Búsqueda local (`bdns-local-sync`, PR4) ---------------------------------
+
+
+class ConvocatoriaResumen(BaseModel):
+    """Fila del buscador. `estado` se calcula en SQL contra el día de hoy en Madrid."""
+
+    id: int
+    codigo_bdns: str
+    titulo: str
+    nivel_administracion: str | None
+    administracion: str | None
+    organo_convocante: str | None
+    fecha_registro: date | None
+    fecha_inicio_solicitud: date | None
+    fecha_fin_solicitud: date | None
+    estado: EstadoConvocatoria
+    plazo_permanente: bool
+    presupuesto_total: float | None
+    financiada_mrr: bool
+    tipo_convocatoria: str | None
+    finalidad: str | None
+    url_portal_oficial: str | None
+    # BDNS ids of the grant's region and its ancestors (match them with `/catalogos/regiones`).
+    region_ids: list[int]
+    tema: TemaConvocatoria
+    gestiona_subvfy: bool
+    # Only with `orden=afinidad` (0-100, computed on the fly for the company of the session); otherwise `None`.
+    afinidad: int | None = None
+
+
+class DocumentoConvocatoria(BaseModel):
+    """Documento de la ficha. `url` es la ruta propia de descarga (nunca un host de la BDNS)."""
+
+    id: int
+    nombre: str | None = None
+    descripcion: str | None = None
+    tamano_bytes: int | None = None
+    fecha_modificacion: str | None = None
+    fecha_publicacion: str | None = None
+    url: str | None = None
+
+
+class ConvocatoriaDetalle(ConvocatoriaResumen):
+    sede_electronica: str | None
+    url_bases_reguladoras: str | None
+    beneficiarios: list[str]
+    sectores: list[str]
+    instrumentos: list[str]
+    fondos: list[str]
+    objetivos: list[str]
+    regiones: list[str]
+    bases_reguladoras: str | None
+    documentos: list[DocumentoConvocatoria]
+    retirada: bool
+    ultima_actualizacion: datetime | None
+
+
+class TemaRead(BaseModel):
+    """Entry of `GET /catalogos/temas`. `gestiona_subvfy` is what the rule says for that theme."""
+
+    codigo: TemaConvocatoria
+    nombre: str
+    gestiona_subvfy: bool
+
+
+class ExcepcionGestionUpsert(BaseModel):
+    """Body of `PUT /admin/gestion-excepciones/{codigo_bdns}`."""
+
+    gestiona: bool
+    motivo: str | None = Field(default=None, max_length=300)
+
+
+class ExcepcionGestionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    codigo_bdns: str
+    titulo: str
+    gestiona: bool
+    motivo: str | None
+    updated_at: datetime
+
+
+class ResumenConvocatorias(BaseModel):
+    abiertas: int
+    presupuesto_abiertas: float
+    total: int
+    ultima_sincronizacion: datetime | None
+
+
+class MapaComunidad(BaseModel):
+    region_id: int  # catalogue id of the community: the value the `region` filter takes
+    nombre: str
+    total: int
+    abiertas: int
+    presupuesto: float
+
+
+class MapaZonaEstatal(BaseModel):
+    total: int
+    abiertas: int
+    presupuesto: float
+
+
+class MapaSinZona(BaseModel):
+    total: int
+
+
+class MapaConvocatorias(BaseModel):
+    """`GET /convocatorias/mapa`. A grant in several communities counts in each, so the sum of `por_comunidad`
+    (plus `estatal` and `sin_zona`) can exceed `total`. Budgets are the grant's total, not split."""
+
+    total: int
+    presupuesto_total: float
+    por_comunidad: list[MapaComunidad]
+    estatal: MapaZonaEstatal
+    sin_zona: MapaSinZona
+    exterior: MapaZonaEstatal  # project abroad (extra-regio, non-European, foreign); outside the other buckets

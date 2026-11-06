@@ -3,7 +3,8 @@
 from pydantic import BaseModel, EmailStr, Field
 
 from app.core.security import PASSWORD_MAX_BYTES
-from app.schemas.usuario import UsuarioRead
+from app.schemas.empresa import EmpresaSesion
+from app.schemas.usuario import Password, UsuarioRead
 
 
 class LoginRequest(BaseModel):
@@ -11,6 +12,9 @@ class LoginRequest(BaseModel):
     # Sin min_length: en el login no se validan reglas de contraseña, solo
     # se comprueba si coincide. Un 422 aquí le diría a quien prueba
     # credenciales que esa contraseña ni siquiera merecía consulta.
+    # Tampoco se validan bytes, a propósito: quien se dio de alta con más de 72
+    # bytes cuando passlib truncaba tiene que poder entrar, y verificar_password
+    # ya corta a 72 antes de llamar a bcrypt.
     password: str = Field(max_length=PASSWORD_MAX_BYTES)
 
 
@@ -30,3 +34,18 @@ class SesionResponse(TokenResponse):
     frontend pinta la sesión sin encadenar una segunda llamada a /auth/me."""
 
     usuario: UsuarioRead
+
+
+class UsuarioSesionRead(UsuarioRead):
+    """`GET /auth/me`: el usuario y el estado mínimo de su empresa, para que el front pida la
+    actividad pendiente sin una llamada más."""
+
+    empresa: EmpresaSesion
+
+
+class CambiarPasswordRequest(BaseModel):
+    """`POST /auth/cambiar-password`: pide la contraseña actual, a diferencia de `PATCH /usuarios/{id}`."""
+
+    # Como en el login, la actual no se valida con las reglas de la política: solo se compara.
+    password_actual: str = Field(max_length=PASSWORD_MAX_BYTES)
+    password_nueva: Password

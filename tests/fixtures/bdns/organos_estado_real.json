@@ -1,0 +1,48 @@
+[
+  {
+    "descripcion": "MINISTERIO DE AGRICULTURA, PESCA Y ALIMENTACIÓN",
+    "id": 23,
+    "children": [
+      {
+        "descripcion": "DIRECCIÓN GENERAL DE ALIMENTACIÓN",
+        "id": 61
+      },
+      {
+        "descripcion": "DIRECCIÓN GENERAL DE DESARROLLO RURAL, INNOVACIÓN Y FORMACIÓN AGROALIMENTARIA",
+        "id": 62
+      },
+      {
+        "descripcion": "DIRECCIÓN GENERAL DE ORDENACIÓN PESQUERA Y ACUICULTURA",
+        "id": 1888
+      },
+      {
+        "descripcion": "DIRECCIÓN GENERAL DE PRODUCCIONES Y MERCADOS AGRARIOS",
+        "id": 60
+      },
+      {
+        "descripcion": "DIRECCIÓN GENERAL DE SANIDAD DE LA PRODUCCIÓN AGROALIMENTARIA Y BIENESTAR ANIMAL",
+        "id": 1727
+      },
+      {
+        "descripcion": "ENTIDAD ESTATAL DE SEGUROS AGRARIOS - ENESA",
+        "id": 1849
+      },
+      {
+        "descripcion": "FONDO ESPAÑOL DE GARANTÍA AGRARIA",
+        "id": 1729
+      },
+      {
+        "descripcion": "SECRETARÍA GENERAL DE AGRICULTURA Y ALIMENTACIÓN",
+        "id": 6616
+      },
+      {
+        "descripcion": "SECRETARÍA GENERAL DE PESCA",
+        "id": 59
+      },
+      {
+        "descripcion": "SUBSECRETARÍA DE AGRICULTURA, PESCA Y ALIMENTACIÓN",
+        "id": 708
+      }
+    ]
+  }
+]
