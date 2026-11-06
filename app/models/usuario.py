@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -15,6 +15,10 @@ class Usuario(Base, AuditMixin):
         CheckConstraint(f"estado IN {ESTADOS_USUARIO}", name="ck_usuario_estado"),
         Index("ix_usuario_empresa", "empresa_id"),
         Index("ix_usuario_email", "email"),
+        UniqueConstraint("calendario_token", name="uq_usuario_calendario_token"),
+        CheckConstraint(
+            "calendario_token IS NULL OR length(calendario_token) >= 32", name="ck_usuario_calendario_token"
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -26,3 +30,6 @@ class Usuario(Base, AuditMixin):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     estado: Mapped[str] = mapped_column(String(20), nullable=False, default="activo", server_default="activo")
     ultimo_acceso_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Secret of the personal calendar feed (plan N6). `secrets.token_urlsafe(32)`, created on first use and
+    # replaced on rotation. Never serialised by the user schemas.
+    calendario_token: Mapped[str | None] = mapped_column(String(64))

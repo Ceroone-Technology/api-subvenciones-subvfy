@@ -73,6 +73,9 @@ class Settings(BaseSettings):
     frontend_ruta_convocatoria: str = "/convocatorias/{codigo_bdns}"
     frontend_ruta_alertas: str = "/alertas"
 
+    # URL pública de esta API: la usan los enlaces que salen de ella (suscripción ICS del calendario).
+    api_publica_url: str = "http://localhost:8000"
+
     # BDNS (fuente de verdad de las convocatorias). Solo lectura, sin clave:
     # la API es pública. Sin rate limit documentado, de ahí los topes.
     bdns_base_url: str = "https://www.infosubvenciones.es/bdnstrans/api"
