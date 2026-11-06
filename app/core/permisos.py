@@ -104,6 +104,19 @@ def motivo_cuenta_no_operativa(estado_usuario: str, estado_empresa: str) -> str 
     return None
 
 
+class CuentaNoOperativa(HTTPException):
+    """403 de una cuenta que no puede operar.
+
+    `detail` sigue siendo el texto (el frontend lo muestra tal cual) y el cuerpo añade `codigo`, estable y legible
+    por máquina: `empresa_inactiva` o `cuenta_no_activa`.
+    """
+
+    def __init__(self, estado_usuario: str, estado_empresa: str) -> None:
+        motivo = motivo_cuenta_no_operativa(estado_usuario, estado_empresa) or "La cuenta no puede operar."
+        super().__init__(status.HTTP_403_FORBIDDEN, detail=motivo)
+        self.codigo = "empresa_inactiva" if estado_empresa != ESTADO_EMPRESA_ACTIVA else "cuenta_no_activa"
+
+
 @dataclass(frozen=True)
 class UsuarioAutenticado:
     """El usuario del token, ya resuelto contra la base de datos, junto con
@@ -262,7 +275,7 @@ async def usuario_actual(
         # El token sigue siendo criptográficamente válido, pero la cuenta ya
         # no: bloquear a alguien, o dar de baja su empresa, tiene efecto
         # inmediato y no cuando caduque el token.
-        raise HTTPException(status.HTTP_403_FORBIDDEN, detail=motivo)
+        raise CuentaNoOperativa(usuario.estado, estado_empresa)
     return UsuarioAutenticado(usuario=usuario, rol=rol_codigo)
 
 

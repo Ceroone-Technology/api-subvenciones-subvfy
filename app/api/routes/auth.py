@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 from app.api.deps import DbDep
 from app.config import settings
 from app.core.limite_intentos import cambio_de_password
-from app.core.permisos import UsuarioActualDep, motivo_cuenta_no_operativa
+from app.core.permisos import CuentaNoOperativa, UsuarioActualDep, motivo_cuenta_no_operativa
 from app.core.security import (
     TIPO_REFRESH,
     TokenInvalido,
@@ -94,7 +94,7 @@ async def login(datos: LoginRequest, db: DbDep) -> SesionResponse:
     usuario, estado_empresa = fila
     motivo = motivo_cuenta_no_operativa(usuario.estado, estado_empresa)
     if motivo is not None:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, detail=motivo)
+        raise CuentaNoOperativa(usuario.estado, estado_empresa)
 
     usuario.ultimo_acceso_at = func.now()
     await db.commit()

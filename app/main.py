@@ -31,7 +31,8 @@ from app.api.routes import (
     usuarios,
 )
 from app.config import settings
-from app.core.errores import crear_manejador_errores
+from app.core.errores import crear_manejador_errores, cuenta_no_operativa_handler
+from app.core.permisos import CuentaNoOperativa
 from app.core.scheduler import iniciar_scheduler, parar_scheduler
 
 
@@ -73,6 +74,7 @@ app.add_middleware(
 
 # Va a `ServerErrorMiddleware`, por fuera del CORS: el manejador añade él mismo las cabeceras.
 app.add_exception_handler(Exception, crear_manejador_errores(settings.cors_origins_list))
+app.add_exception_handler(CuentaNoOperativa, cuenta_no_operativa_handler)
 
 app.include_router(auth.router)
 app.include_router(roles.router)

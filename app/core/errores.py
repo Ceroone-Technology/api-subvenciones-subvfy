@@ -13,6 +13,8 @@ from collections.abc import Awaitable, Callable
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from app.core.permisos import CuentaNoOperativa
+
 logger = logging.getLogger("app.errores")
 
 MENSAJE_ERROR_INTERNO = "Ha ocurrido un error inesperado. Inténtalo de nuevo más tarde."
@@ -42,3 +44,9 @@ def crear_manejador_errores(
         return JSONResponse({"detail": MENSAJE_ERROR_INTERNO}, status_code=500, headers=headers)
 
     return manejar
+
+
+async def cuenta_no_operativa_handler(request: Request, exc: Exception) -> JSONResponse:
+    """403 de cuenta inactiva: `{"detail": <texto>, "codigo": <código estable>}`."""
+    assert isinstance(exc, CuentaNoOperativa)
+    return JSONResponse({"detail": exc.detail, "codigo": exc.codigo}, status_code=exc.status_code)

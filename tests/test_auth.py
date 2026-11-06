@@ -172,13 +172,13 @@ async def test_con_la_empresa_de_baja_no_se_entra_ni_se_opera(
 
     login = await client.post("/auth/login", json={"email": gestor.email, "password": PASSWORD_TEST})
     assert login.status_code == 403, login.text
-    assert login.json()["detail"] == "La empresa está dada de baja."
+    assert login.json() == {"detail": "La empresa está dada de baja.", "codigo": "empresa_inactiva"}
 
     # Y un token emitido antes de la baja deja de servir en el acto: la
     # dependencia relee usuario y empresa en cada petición.
     me = await client.get("/auth/me", headers={"Authorization": f"Bearer {gestor.token}"})
     assert me.status_code == 403, me.text
-    assert me.json()["detail"] == "La empresa está dada de baja."
+    assert me.json() == {"detail": "La empresa está dada de baja.", "codigo": "empresa_inactiva"}
 
     alertas = await client.get("/alertas", headers={"Authorization": f"Bearer {gestor.token}"})
     assert alertas.status_code == 403, alertas.text
