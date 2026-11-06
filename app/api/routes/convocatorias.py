@@ -4,7 +4,8 @@ Todo el router exige un usuario autenticado de cualquier rol (D13): la dependenc
 está a nivel de router para que una ruta nueva no pueda olvidarla. Los datos son
 globales, sin filtro por empresa. Nada de aquí llama a la BDNS.
 
-**Orden de declaración**: `/resumen`, `/mapa` y `/export` van antes de `/{codigo_bdns}`, o la segunda lo capturaría.
+**Orden de declaración**: `/resumen`, `/mapa`, `/estadisticas` y `/export` van antes de `/{codigo_bdns}`,
+o el detalle las capturaría.
 """
 
 from datetime import UTC, date, datetime
@@ -18,7 +19,7 @@ from pydantic import Field, StringConstraints
 from sqlalchemy import select
 
 from app.api.deps import DbDep, PaginacionDep, UsuarioActualDep
-from app.core.permisos import usuario_actual
+from app.core.permisos import ROL_ADMIN, ROL_GESTOR, exigir_roles, usuario_actual
 from app.models import Empresa
 from app.models.convocatoria import TEMAS
 from app.models.sector_actividad import CODIGO_ACTIVIDAD_OTRA
@@ -33,8 +34,10 @@ from app.schemas.convocatoria import (
     TemaConvocatoria,
 )
 from app.schemas.empresa import CodigoActividad
+from app.schemas.estadisticas import PERIODOS, EstadisticasPanel
 from app.services import busqueda_convocatorias as busqueda
 from app.services import documentos as servicio_documentos
+from app.services import estadisticas_convocatorias as servicio_estadisticas
 from app.services import exportacion_convocatorias as exportacion
 from app.services import mapa_convocatorias as servicio_mapa
 from app.services import radar as servicio_radar
@@ -160,6 +163,21 @@ async def resumen(db: DbDep) -> ResumenConvocatorias:
 )
 async def mapa(db: DbDep, filtros: FiltrosDep) -> MapaConvocatorias:
     return MapaConvocatorias.model_validate(await servicio_mapa.mapa(db, filtros))
+
+
+@router.get(
+    "/estadisticas",
+    response_model=EstadisticasPanel,
+    summary="Estadísticas de convocatorias para el panel",
+    dependencies=[Depends(exigir_roles(ROL_ADMIN, ROL_GESTOR))],
+    description="Solo admin y gestor. Cifras globales: KPIs con variación del periodo (`dias` 7, 30 o 90), "
+    "publicadas por semana (12 semanas), fondos por tema y cierres de los próximos 30 días. "
+    "`embudo` va vacío hasta que exista el CRM. Caché en memoria de 60 s.",
+)
+async def estadisticas(db: DbDep, dias: Annotated[int, Query(description="7, 30 o 90.")] = 30) -> EstadisticasPanel:
+    if dias not in PERIODOS:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail="`dias` debe ser 7, 30 o 90.")
+    return await servicio_estadisticas.estadisticas(db, dias)
 
 
 @router.get("/export", summary="Exportar el resultado filtrado a CSV o XLSX")
