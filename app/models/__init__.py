@@ -18,6 +18,8 @@ from app.models.documento_acceso import DocumentoAcceso
 from app.models.empresa import Empresa
 from app.models.empresa_palabra_clave import EmpresaPalabraClave
 from app.models.favorito import Favorito
+from app.models.gestion_excepcion import GestionExcepcion
+from app.models.interes import EmpresaInteres, Interes
 from app.models.mensaje_asistente import MensajeAsistente
 from app.models.rol import Rol
 from app.models.sector_actividad import SectorActividad
@@ -37,8 +39,11 @@ __all__ = [
     "DocumentoAcceso",
     "ConversacionAsistente",
     "Empresa",
+    "EmpresaInteres",
     "EmpresaPalabraClave",
     "Favorito",
+    "GestionExcepcion",
+    "Interes",
     "MensajeAsistente",
     "Rol",
     "SectorActividad",

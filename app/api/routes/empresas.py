@@ -42,6 +42,7 @@ from app.schemas.empresa import (
     EmpresaUpdate,
     EstadoEmpresa,
 )
+from app.services import empresas as servicio
 
 router = APIRouter(prefix="/empresas", tags=["empresas"])
 
@@ -104,7 +105,7 @@ async def listar_empresas(
         .limit(paginacion.size)
     )
     return Pagina[EmpresaRead](
-        items=[EmpresaRead.model_validate(e) for e in result.scalars().all()],
+        items=await servicio.leer(db, list(result.scalars().all())),
         total=total or 0,
         page=paginacion.page,
         size=paginacion.size,
@@ -112,28 +113,39 @@ async def listar_empresas(
 
 
 @router.post("", response_model=EmpresaRead, status_code=status.HTTP_201_CREATED, summary="Crear empresa")
-async def crear_empresa(datos: EmpresaCreate, db: DbDep, actual: AdminDep) -> Empresa:
+async def crear_empresa(datos: EmpresaCreate, db: DbDep, actual: AdminDep) -> EmpresaRead:
     await _exigir_nif_libre(db, datos.nif)
-    empresa = Empresa(**datos.model_dump(), created_by=actual.id, updated_by=actual.id)
+    campos = datos.model_dump(exclude={"intereses"})
+    empresa = Empresa(**campos, created_by=actual.id, updated_by=actual.id)
     db.add(empresa)
+    await db.flush()
+    await servicio.reemplazar_intereses(db, empresa.id, datos.intereses or [], actual.id)
     await db.commit()
     await db.refresh(empresa)
-    return empresa
+    return (await servicio.leer(db, [empresa]))[0]
+
+
+@router.get("/me", response_model=EmpresaRead, summary="Mi empresa, con la completitud del perfil")
+async def mi_empresa(db: DbDep, actual: UsuarioActualDep) -> EmpresaRead:
+    """Cualquier rol: devuelve la empresa del token. Editarla es `PATCH /empresas/{id}` (gestor o admin)."""
+    empresa = await _obtener_o_404(db, actual.usuario.empresa_id)
+    return (await servicio.leer(db, [empresa]))[0]
 
 
 @router.get("/{empresa_id}", response_model=EmpresaRead, summary="Obtener una empresa")
-async def obtener_empresa(empresa_id: int, db: DbDep, actual: UsuarioActualDep) -> Empresa:
+async def obtener_empresa(empresa_id: int, db: DbDep, actual: UsuarioActualDep) -> EmpresaRead:
     actual.exigir_acceso_a_empresa(empresa_id)
-    return await _obtener_o_404(db, empresa_id)
+    return (await servicio.leer(db, [await _obtener_o_404(db, empresa_id)]))[0]
 
 
 @router.patch("/{empresa_id}", response_model=EmpresaRead, summary="Actualizar una empresa")
 async def actualizar_empresa(
     empresa_id: int, datos: EmpresaUpdate, db: DbDep, actual: GestorDep
-) -> Empresa:
+) -> EmpresaRead:
     actual.exigir_acceso_a_empresa(empresa_id)
     cambios = datos.model_dump(exclude_unset=True)
     actual.exigir_campos_de_empresa_permitidos(cambios)
+    intereses = cambios.pop("intereses", None)
     if cambios.get("estado", ESTADO_EMPRESA_ACTIVA) != ESTADO_EMPRESA_ACTIVA:
         actual.exigir_no_es_su_propia_empresa(empresa_id)
 
@@ -144,10 +156,12 @@ async def actualizar_empresa(
         _resolver_actividad(empresa, cambios)
     for campo, valor in cambios.items():
         setattr(empresa, campo, valor)
+    if intereses is not None:
+        await servicio.reemplazar_intereses(db, empresa_id, intereses, actual.id)
     empresa.updated_by = actual.id
     await db.commit()
     await db.refresh(empresa)
-    return empresa
+    return (await servicio.leer(db, [empresa]))[0]
 
 
 @router.delete("/{empresa_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Dar de baja una empresa")

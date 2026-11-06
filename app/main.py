@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import (
     admin_documentos,
+    admin_gestion,
     admin_sync,
     alertas,
     auth,
@@ -71,6 +72,7 @@ app.include_router(favoritos.router)
 app.include_router(alertas.router)
 app.include_router(admin_sync.router)
 app.include_router(admin_documentos.router)
+app.include_router(admin_gestion.router)
 app.include_router(convocatorias.router)
 app.include_router(catalogos.router)
 

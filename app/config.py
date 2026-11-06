@@ -156,6 +156,16 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def _solape_de_alertas_cubre_un_sync(self) -> "Settings":
+        # Un solape menor que la duración máxima de un sync dejaría fuera novedades que el sync confirma tarde.
+        if self.alertas_solape_minutos < self.sync_max_minutos:
+            raise ValueError(
+                f"ALERTAS_SOLAPE_MINUTOS ({self.alertas_solape_minutos}) debe ser al menos SYNC_MAX_MINUTOS "
+                f"({self.sync_max_minutos}): tiene que cubrir un sync entero."
+            )
+        return self
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

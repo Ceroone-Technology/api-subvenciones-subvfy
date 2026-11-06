@@ -25,6 +25,7 @@ from sqlalchemy import select
 from app.core.security import PASSWORD_MAX_BYTES, PASSWORD_MIN_LONGITUD, hashear_password
 from app.database import AsyncSessionLocal
 from app.models import Empresa, Rol, Usuario
+from app.services.clasificacion import ResultadoRecalculo, recalcular
 from app.services.cnae_relleno import ejecutar_relleno
 from app.services.sync_bdns import ejecutar_sync
 
@@ -106,6 +107,18 @@ def _rellenar_cnae(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+async def _recalcular_clasificacion() -> ResultadoRecalculo:
+    async with AsyncSessionLocal() as db:
+        return await recalcular(db)
+
+
+def _recalcular(_: argparse.Namespace) -> None:
+    r = asyncio.run(_recalcular_clasificacion())
+    print(f"Clasificación: {r.total} convocatorias, {r.cambiadas} cambiadas, {r.gestionadas} gestionadas por Subvfy.")
+    for tema, n in sorted(r.por_tema.items()):
+        print(f"  {tema}: {n}")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m app.cli", description=__doc__)
     subcomandos = parser.add_subparsers(dest="comando", required=True)
@@ -129,7 +142,15 @@ def main(argv: list[str] | None = None) -> None:
     cnae = subcomandos.add_parser("rellenar-cnae", help="Rellena las secciones CNAE de convocatorias ya cacheadas.")
     cnae.add_argument("--limite", type=int, default=500, help="Convocatorias a procesar (1 petición cada una).")
 
+    subcomandos.add_parser(
+        "recalcular-clasificacion",
+        help="Recalcula tema y gestiona_subvfy de todas las convocatorias (sin llamar a la BDNS).",
+    )
+
     args = parser.parse_args(argv)
+    if args.comando == "recalcular-clasificacion":
+        _recalcular(args)
+        return
     if args.comando == "sync-bdns":
         _sync_bdns(args)
         return

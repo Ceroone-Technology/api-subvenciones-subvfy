@@ -52,7 +52,15 @@ class AlmacenDocumentos(Protocol):
     async def guardar(self, origen: AsyncIterator[bytes], max_bytes: int) -> tuple[str, int]: ...
     def abrir(self, clave: str) -> AsyncIterator[bytes]: ...
     async def existe(self, clave: str) -> bool: ...
-    def url_temporal(self, clave: str) -> str | None: ...
+    def url_temporal(self, clave: str, *, mime: str, content_disposition: str) -> str | None:
+        """Signed URL, or `None` if the route must stream the content itself.
+
+        `mime` (already passed through `mime_seguro`) and `content_disposition` are **mandatory** for an
+        implementation that redirects: it must force them in the signature (S3: `ResponseContentType` and
+        `ResponseContentDisposition`), because the object's stored metadata comes from the BDNS and could be
+        `text/html`. The S3 `put` must also store `application/octet-stream`, never the BDNS type.
+        """
+        ...
 
 
 class AlmacenLocal:
@@ -99,7 +107,7 @@ class AlmacenLocal:
     async def existe(self, clave: str) -> bool:
         return await asyncio.to_thread(self._ruta(clave).is_file)
 
-    def url_temporal(self, clave: str) -> str | None:
+    def url_temporal(self, clave: str, *, mime: str, content_disposition: str) -> str | None:
         return None
 
 

@@ -37,6 +37,7 @@ from app.services.bdns_cliente import BdnsNoDisponible, ConvocatoriaBdns
 from app.services.bdns_mapper import DetalleInvalido, etiquetas_region, mapear_detalle, ruta_organo
 from app.services.bdns_sync_cliente import CircuitoAbierto, ClienteBdnsSync
 from app.services.catalogos import ResolvedorCatalogo, cargar_resolvedor, refrescar_catalogos
+from app.services.clasificacion import clasificar_tema, excepcion_de, gestiona_por_regla
 from app.services.convocatoria_estado import ABIERTA, ABIERTA_SIN_PLAZO, PENDIENTE, estado_expr
 from app.services.deduplicacion_alertas import NIVEL_BDNS_A_NUESTRO
 from app.services.sistema import id_usuario_sistema
@@ -373,6 +374,7 @@ async def _guardar_resumen(
             "organo_convocante": f.nivel3[:300] if f.nivel3 else None,
             "fecha_registro": f.fecha_registro,
             "financiada_mrr": f.financiada_mrr,
+            **_clasificacion_del_resumen(f.titulo or codigo),
             "first_seen_at": ahora,
             "last_seen_at": ahora,
             "created_by": uid,
@@ -510,6 +512,8 @@ async def _upsert_detalle(db: AsyncSession, fila: dict[str, Any], ahora: datetim
     set_: dict[str, Any] = {k: ins.excluded[k] for k in fila if k not in omitir}
     set_.update({k: func.coalesce(ins.excluded[k], getattr(Convocatoria, k)) for k in CONSERVAR})
     set_.update(
+        # The admin override (if any) wins over the rule computed for this refresh.
+        gestiona_subvfy=func.coalesce(excepcion_de(), ins.excluded.gestiona_subvfy),
         financiada_mrr=func.coalesce(literal(mrr, Boolean), Convocatoria.financiada_mrr),
         detalle_sync_at=ahora,
         last_seen_at=ahora,
@@ -519,3 +523,9 @@ async def _upsert_detalle(db: AsyncSession, fila: dict[str, Any], ahora: datetim
         updated_at=ahora,
     )
     await db.execute(ins.on_conflict_do_update(index_elements=[Convocatoria.codigo_bdns], set_=set_))
+
+
+def _clasificacion_del_resumen(titulo: str) -> dict[str, Any]:
+    """Provisional theme of a row that only has its list entry (title); the detail refines it later."""
+    tema = clasificar_tema(titulo=titulo)
+    return {"tema": tema, "gestiona_subvfy": gestiona_por_regla(tema)}

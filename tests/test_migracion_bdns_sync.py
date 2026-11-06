@@ -142,7 +142,8 @@ async def test_the_existing_convocatoria_check_is_untouched() -> None:
     filas = await _filas(
         "SELECT conname FROM pg_constraint WHERE conrelid = 'convocatoria'::regclass AND contype = 'c'"
     )
-    assert {fila["conname"] for fila in filas} == {"ck_convocatoria_nivel"}
+    # `ck_convocatoria_tema` was added later by the classification migration (N1).
+    assert {fila["conname"] for fila in filas} == {"ck_convocatoria_nivel", "ck_convocatoria_tema"}
 
 
 @pytest.mark.parametrize(

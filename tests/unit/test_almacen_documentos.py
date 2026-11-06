@@ -44,7 +44,7 @@ async def test_guardar_devuelve_sha_y_tamano_y_abrir_lo_devuelve(tmp_path: Path)
     assert (obtenido_sha, tamano) == (sha, len(datos))
     assert await almacen.existe(clave)
     assert await _leer(almacen.abrir(clave)) == datos
-    assert almacen.url_temporal(clave) is None
+    assert almacen.url_temporal(clave, mime="application/pdf", content_disposition="attachment") is None
     assert _archivos(tmp_path) == [tmp_path / "documentos" / sha[:2] / sha]
 
 

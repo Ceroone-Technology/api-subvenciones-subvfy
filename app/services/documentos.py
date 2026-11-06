@@ -89,15 +89,20 @@ def nombre_seguro(*candidatos: str | None, id_documento: int) -> str:
 _MIME_VALIDO = re.compile(r"^[a-z0-9][a-z0-9!#$&^_.+-]{0,99}/[a-z0-9][a-z0-9!#$&^_.+-]{0,99}$")
 # Tipos que un navegador ejecuta o interpreta como página: nunca se sirven como lo que dice la BDNS.
 _MIME_ACTIVO = {
-    "text/html", "application/xhtml+xml", "image/svg+xml", "text/xml", "application/xml",
-    "text/javascript", "application/javascript",
+    "text/html", "text/xml", "application/xml", "text/xsl", "text/css",
+    "text/javascript", "application/javascript", "text/ecmascript", "application/ecmascript",
+    "application/x-javascript",
 }  # fmt: skip
 
 
 def mime_seguro(mime: str | None) -> str:
-    """El `Content-Type` llega de la BDNS: se sirve solo si tiene forma de tipo MIME y no es activo."""
+    """El `Content-Type` llega de la BDNS: se sirve solo si tiene forma de tipo MIME y no es activo.
+
+    Todo sufijo `+xml` (xhtml, svg, xslt, rss, atom, mathml...) se trata como activo: un navegador interpreta
+    cualquiera de ellos como documento XML con scripts o hojas de estilo.
+    """
     limpio = (mime or "").strip().lower()
-    if not _MIME_VALIDO.match(limpio) or limpio in _MIME_ACTIVO:
+    if not _MIME_VALIDO.match(limpio) or limpio in _MIME_ACTIVO or limpio.endswith("+xml"):
         return "application/octet-stream"
     return limpio
 

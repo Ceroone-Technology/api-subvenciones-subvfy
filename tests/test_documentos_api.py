@@ -141,6 +141,35 @@ async def test_primera_descarga_baja_de_bdns_guarda_y_sirve(
     assert [p.name for p in archivos(almacen_dir) if p.parent.name != "tmp"] == [SHA]
 
 
+class AlmacenConUrl(AlmacenLocal):
+    """Local store that, like the future S3 one, answers with a temporary URL; records what it was asked to force."""
+
+    def __init__(self, raiz: Path) -> None:
+        super().__init__(raiz)
+        self.pedidos: list[tuple[str, str, str]] = []
+
+    def url_temporal(self, clave: str, *, mime: str, content_disposition: str) -> str | None:
+        self.pedidos.append((clave, mime, content_disposition))
+        return "https://bucket.example/firmada"
+
+
+async def test_la_redireccion_a_url_temporal_fuerza_tipo_seguro_y_descarga(
+    client_usuario: AsyncClient, bdns: Bdns, almacen_dir: Path
+) -> None:
+    """The BDNS says image/svg+xml: the signed URL must not serve it as a page (it overrides type and disposition)."""
+    bdns.respuesta = lambda: httpx.Response(200, content=b"<svg onload=x>", headers={"content-type": "image/svg+xml"})
+    almacen = AlmacenConUrl(almacen_dir)
+    app.dependency_overrides[documentos.almacen] = lambda: almacen
+    codigo = await convocatoria_con_documento()
+    r = await client_usuario.get(url(codigo), follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "https://bucket.example/firmada"
+    assert r.headers["cache-control"] == "private, no-store"
+    [(_, mime, disposicion)] = almacen.pedidos
+    assert mime == "application/octet-stream"
+    assert disposicion.startswith("attachment;") and "bases.pdf" in disposicion
+
+
 async def test_segunda_peticion_sale_del_almacen_para_otro_usuario(
     client_usuario: AsyncClient, bdns: Bdns, empresa: dict
 ) -> None:

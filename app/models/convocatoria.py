@@ -25,6 +25,10 @@ from app.models.base import AuditMixin
 
 NIVELES_ADMINISTRACION = ("estado", "ccaa", "local", "otros")
 
+# Own classification (N1). `otro` is the default bucket; `dig` and `id` are what Subvfy manages itself.
+TEMAS = ("dig", "id", "ene", "int", "emp", "otro")
+TEMAS_GESTIONADOS = ("dig", "id")
+
 # Full-text search: `es_unaccent` is the text search configuration created by
 # migration `bdns_local_sync` (Spanish, plus the `unaccent` mapping when the
 # extension is available). A regconfig mapping is IMMUTABLE, so it can feed a
@@ -49,6 +53,8 @@ class Convocatoria(Base, AuditMixin):
     __tablename__ = "convocatoria"
     __table_args__ = (
         CheckConstraint(f"nivel_administracion IN {NIVELES_ADMINISTRACION}", name="ck_convocatoria_nivel"),
+        # Written by hand in the migration too: Alembic does not compare CHECKs.
+        CheckConstraint(f"tema IN {TEMAS}", name="ck_convocatoria_tema"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -98,6 +104,10 @@ class Convocatoria(Base, AuditMixin):
     cnae_secciones: Mapped[list[str]] = mapped_column(
         ARRAY(CHAR(1)), nullable=False, default=list, server_default=text("'{}'::char(1)[]")
     )
+    # Own classification by rules (`app.services.clasificacion`); recomputed with `recalcular-clasificacion`.
+    tema: Mapped[str] = mapped_column(String(5), nullable=False, default="otro", server_default="otro")
+    # Rule (tema in TEMAS_GESTIONADOS) overridden by the admin table `gestion_excepcion`.
+    gestiona_subvfy: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     # Compact detail: documents, instruments, funds, objectives, region labels, bases text.
     detalle: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     # sha256 hex of the mapped content; an upsert is skipped when it is unchanged.
@@ -129,6 +139,8 @@ Index("ix_convocatoria_organo_ids", _c.organo_ids, postgresql_using="gin")
 Index("ix_convocatoria_region_ids", _c.region_ids, postgresql_using="gin")
 Index("ix_convocatoria_beneficiarios", _c.beneficiarios, postgresql_using="gin")
 Index("ix_convocatoria_cnae_secciones", _c.cnae_secciones, postgresql_using="gin")
+Index("ix_convocatoria_tema", _c.tema)
+Index("ix_convocatoria_gestiona", _c.id, postgresql_where=_c.gestiona_subvfy.is_(True))
 # Rolling refresh walks the oldest `detalle_sync_at` first; never-fetched rows lead.
 Index("ix_convocatoria_refresco", _c.detalle_sync_at.asc().nulls_first())
 Index("ix_convocatoria_disponible", _c.disponible_at)

@@ -27,6 +27,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from app.models import Convocatoria
+from app.services.clasificacion import clasificar_tema, gestiona_por_regla
 from app.services.cnae import secciones_de
 from app.services.deduplicacion_alertas import NIVEL_BDNS_A_NUESTRO
 
@@ -121,6 +122,15 @@ def mapear_detalle(
         "detalle": _detalle_compacto(detalle),
     }
     fila["contenido_hash"] = _hash(fila)
+    # Derived by our own rules, outside the hash: changing a rule must not rewrite every row on the next refresh
+    # (`recalcular-clasificacion` does that). `gestiona_subvfy` is the rule; the upsert applies the admin overrides.
+    fila["tema"] = clasificar_tema(
+        titulo=fila["titulo"],
+        finalidad=fila["finalidad"],
+        objetivos=fila["detalle"].get("objetivos", []),
+        sectores=fila["sectores"],
+    )
+    fila["gestiona_subvfy"] = gestiona_por_regla(fila["tema"])
     return fila
 
 

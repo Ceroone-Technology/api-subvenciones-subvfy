@@ -20,6 +20,7 @@ from sqlalchemy import select
 from app.api.deps import DbDep, PaginacionDep, UsuarioActualDep
 from app.core.permisos import usuario_actual
 from app.models import Empresa
+from app.models.convocatoria import TEMAS
 from app.models.sector_actividad import CODIGO_ACTIVIDAD_OTRA
 from app.schemas.common import Pagina
 from app.schemas.convocatoria import (
@@ -28,6 +29,7 @@ from app.schemas.convocatoria import (
     DocumentoConvocatoria,
     NivelAdministracion,
     ResumenConvocatorias,
+    TemaConvocatoria,
 )
 from app.schemas.empresa import CodigoActividad
 from app.services import busqueda_convocatorias as busqueda
@@ -80,6 +82,13 @@ async def filtros_busqueda(
     para_mi_empresa: Annotated[
         bool, Query(description="Usa la actividad de tu empresa. Pendiente u `OTRA`: se ignora. `actividad` prevalece.")
     ] = False,
+    tema: Annotated[
+        list[TemaConvocatoria] | None,
+        Query(max_length=len(TEMAS), description="Temas propios (`/catalogos/temas`); varios se suman (OR)."),
+    ] = None,
+    gestiona: Annotated[
+        bool | None, Query(description="`true`: solo las que gestiona Subvfy; `false`: solo las demás.")
+    ] = None,
 ) -> FiltrosBusqueda:
     seccion = actividad
     if seccion is None and para_mi_empresa:
@@ -95,6 +104,7 @@ async def filtros_busqueda(
         estado=estado or (), registro_desde=registro_desde, registro_hasta=registro_hasta,
         plazo_desde=plazo_desde, plazo_hasta=plazo_hasta, presupuesto_min=presupuesto_min,
         presupuesto_max=presupuesto_max, solo_mrr=solo_mrr, actividad=(seccion,) if seccion else (),
+        tema=tema or (), gestiona=gestiona,
     )  # fmt: skip
 
 
@@ -106,7 +116,10 @@ async def listar(
     db: DbDep,
     filtros: FiltrosDep,
     paginacion: PaginacionDep,
-    orden: Annotated[OrdenConvocatorias, Query(description="`relevancia` solo ordena si hay `q`.")] = "recientes",
+    orden: Annotated[
+        OrdenConvocatorias,
+        Query(description="`relevancia` solo ordena si hay `q`. `cierre`: plazo más próximo primero."),
+    ] = "recientes",
 ) -> Pagina[ConvocatoriaResumen]:
     total, filas = await busqueda.buscar(db, filtros, orden, offset=paginacion.offset, limit=paginacion.size)
     return Pagina(
@@ -216,13 +229,17 @@ async def descargar_documento(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="No se pudo obtener el documento ahora. Inténtalo de nuevo más tarde.",
         ) from None
-    if (temporal := almacen.url_temporal(listo.clave)) is not None:
-        return RedirectResponse(temporal, status_code=status.HTTP_302_FOUND)
+    disposicion = _content_disposition(listo.nombre)
+    temporal = almacen.url_temporal(listo.clave, mime=listo.mime, content_disposition=disposicion)
+    if temporal is not None:
+        return RedirectResponse(
+            temporal, status_code=status.HTTP_302_FOUND, headers={"Cache-Control": "private, no-store"}
+        )
     return StreamingResponse(
         almacen.abrir(listo.clave),
         media_type=listo.mime,
         headers={
-            "Content-Disposition": _content_disposition(listo.nombre),
+            "Content-Disposition": disposicion,
             "Content-Length": str(listo.tamano),
             "X-Content-Type-Options": "nosniff",
             "Cache-Control": "private, no-store",

@@ -11,15 +11,15 @@ from datetime import date
 from decimal import Decimal
 from typing import Any, Literal
 
-from sqlalchemy import ColumnElement, and_, func, literal_column, or_, select
+from sqlalchemy import ColumnElement, and_, case, func, literal_column, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Convocatoria, SyncRun
 from app.models.convocatoria import CONFIG_BUSQUEDA
-from app.services.convocatoria_estado import ABIERTA, estado_expr
+from app.services.convocatoria_estado import ABIERTA, estado_expr, hoy_madrid
 
 c = Convocatoria
-ORDENES = ("recientes", "antiguas", "codigo", "fondos", "relevancia")
+ORDENES = ("recientes", "antiguas", "codigo", "fondos", "relevancia", "cierre")
 OrdenConvocatorias = Literal[ORDENES]  # type: ignore[valid-type]
 
 # Columnas del listado: todo menos `detalle`, que pesa y solo se lee en la ficha.
@@ -27,6 +27,7 @@ COLUMNAS_LISTADO = (
     c.id, c.codigo_bdns, c.titulo, c.nivel_administracion, c.administracion, c.organo_convocante,
     c.fecha_registro, c.fecha_inicio_solicitud, c.fecha_fin_solicitud, c.plazo_permanente,
     c.presupuesto_total, c.financiada_mrr, c.tipo_convocatoria, c.finalidad, c.url_portal_oficial,
+    c.region_ids, c.tema, c.gestiona_subvfy,
 )  # fmt: skip
 
 
@@ -47,6 +48,9 @@ class FiltrosBusqueda:
     solo_mrr: bool = False
     # CNAE section letters (`app.services.cnae`); see `condiciones` for the matching rule.
     actividad: Sequence[str] = ()
+    # Own classification (N1): themes to keep (OR) and the "Subvfy manages it" flag (`None` = no filter).
+    tema: Sequence[str] = ()
+    gestiona: bool | None = None
 
 
 def _consulta_texto(q: str) -> Any:
@@ -86,6 +90,10 @@ def condiciones(f: FiltrosBusqueda) -> list[ColumnElement[bool]]:
         # One that lists sectors we could not map yet (`cnae_secciones` still empty) is NOT open.
         sin_sector = and_(func.cardinality(c.cnae_secciones) == 0, func.cardinality(c.sectores) == 0)
         donde.append(or_(c.cnae_secciones.overlap(list(f.actividad)), sin_sector))
+    if f.tema:
+        donde.append(c.tema.in_(list(f.tema)))
+    if f.gestiona is not None:
+        donde.append(c.gestiona_subvfy.is_(f.gestiona))
     return donde
 
 
@@ -95,6 +103,14 @@ def ordenar(orden: str, f: FiltrosBusqueda) -> list[Any]:
         return [c.fecha_registro.asc().nulls_last(), c.id.asc()]
     if orden == "codigo":
         return [c.codigo_bdns.asc(), c.id.asc()]
+    if orden == "cierre":
+        # Soonest deadline first: upcoming ones ascending, then those without a date, then the already closed
+        # ones (most recent first), so "closing soon" never starts with last year.
+        hoy = hoy_madrid()
+        fin = c.fecha_fin_solicitud
+        grupo = case((fin >= hoy, 0), (fin.is_(None), 1), else_=2)
+        proximas, cerradas = case((fin >= hoy, fin)), case((fin < hoy, fin))
+        return [grupo.asc(), proximas.asc().nulls_last(), cerradas.desc().nulls_last(), c.id.asc()]
     if orden == "fondos":
         return [c.presupuesto_total.desc().nulls_last(), c.id.desc()]
     if orden == "relevancia" and f.q and f.q.strip():

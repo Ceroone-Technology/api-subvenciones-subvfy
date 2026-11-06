@@ -13,6 +13,8 @@ def test_mime_normales_pasan(mime: str) -> None:
 @pytest.mark.parametrize(
     "mime",
     [None, "", "pdf", "text/html", "image/svg+xml", "application/xhtml+xml", "text/xml", "application/javascript",
+     "text/xsl", "application/xslt+xml", "application/rss+xml", "application/atom+xml", "application/vnd.foo+xml",
+     "application/mathml+xml", "text/ecmascript", "application/x-javascript", "text/css",
      "application/pdf\r\nSet-Cookie: a=b", "a/b c", "x" * 200 + "/pdf"],
 )  # fmt: skip
 def test_mime_raros_o_activos_caen_a_octet_stream(mime: str | None) -> None:

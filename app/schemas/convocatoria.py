@@ -12,11 +12,12 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.convocatoria import NIVELES_ADMINISTRACION
+from app.models.convocatoria import NIVELES_ADMINISTRACION, TEMAS
 from app.services.convocatoria_estado import EstadoConvocatoria
 
 # Literal[tupla] funciona en runtime pero mypy no lo acepta (ver CLAUDE.md): de ahí el ignore.
 NivelAdministracion = Literal[NIVELES_ADMINISTRACION]  # type: ignore[valid-type]
+TemaConvocatoria = Literal[TEMAS]  # type: ignore[valid-type]
 CodigoBdns = Annotated[str, Field(min_length=1, max_length=30)]
 
 
@@ -76,6 +77,10 @@ class ConvocatoriaResumen(BaseModel):
     tipo_convocatoria: str | None
     finalidad: str | None
     url_portal_oficial: str | None
+    # BDNS ids of the grant's region and its ancestors (match them with `/catalogos/regiones`).
+    region_ids: list[int]
+    tema: TemaConvocatoria
+    gestiona_subvfy: bool
 
 
 class DocumentoConvocatoria(BaseModel):
@@ -103,6 +108,31 @@ class ConvocatoriaDetalle(ConvocatoriaResumen):
     documentos: list[DocumentoConvocatoria]
     retirada: bool
     ultima_actualizacion: datetime | None
+
+
+class TemaRead(BaseModel):
+    """Entry of `GET /catalogos/temas`. `gestiona_subvfy` is what the rule says for that theme."""
+
+    codigo: TemaConvocatoria
+    nombre: str
+    gestiona_subvfy: bool
+
+
+class ExcepcionGestionUpsert(BaseModel):
+    """Body of `PUT /admin/gestion-excepciones/{codigo_bdns}`."""
+
+    gestiona: bool
+    motivo: str | None = Field(default=None, max_length=300)
+
+
+class ExcepcionGestionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    codigo_bdns: str
+    titulo: str
+    gestiona: bool
+    motivo: str | None
+    updated_at: datetime
 
 
 class ResumenConvocatorias(BaseModel):

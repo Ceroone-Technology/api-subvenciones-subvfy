@@ -38,6 +38,8 @@ from app.models import (
     ConvocatoriaDocumento,
     DocumentoAcceso,
     Empresa,
+    EmpresaInteres,
+    GestionExcepcion,
     Rol,
     SyncRun,
     Usuario,
@@ -231,6 +233,24 @@ async def limpiar_datos_de_test() -> AsyncGenerator[None, None]:
             )
         )
         await db.execute(delete(ConvocatoriaDocumento).where(ConvocatoriaDocumento.id.in_(docs_de_test)))
+        # Excepciones de gestión de convocatorias de prueba, o firmadas por un usuario de prueba (FK sin cascada).
+        await db.execute(
+            delete(GestionExcepcion).where(
+                GestionExcepcion.convocatoria_id.in_(
+                    select(Convocatoria.id).where(Convocatoria.codigo_bdns.like(f"{CODIGO_BDNS_PREFIJO_TEST}%"))
+                )
+                | GestionExcepcion.created_by.in_(usuarios_firmantes)
+                | GestionExcepcion.updated_by.in_(usuarios_firmantes)
+            )
+        )
+        # Intereses de empresas de prueba (o firmados por usuarios de prueba): antes que los usuarios (FK de auditoría).
+        await db.execute(
+            delete(EmpresaInteres).where(
+                EmpresaInteres.empresa_id.in_(select(Empresa.id).where(Empresa.nif.like(f"{NIF_PREFIJO_TEST}%")))
+                | EmpresaInteres.created_by.in_(usuarios_firmantes)
+                | EmpresaInteres.updated_by.in_(usuarios_firmantes)
+            )
+        )
         # Las alertas no pueden esperar a la cascada del usuario: sus filtros
         # quedan a dos niveles (usuario -> alerta -> alerta_organo) y
         # Postgres comprueba su FK de auditoría created_by -> usuario antes de

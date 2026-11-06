@@ -206,3 +206,13 @@ def test_los_valores_publicos_son_los_del_repositorio(archivo: str, linea: str) 
         pytest.skip(f"{archivo} no está en esta copia (imagen de desarrollo)")
     lineas = [linea_leida.strip() for linea_leida in ruta.read_text(encoding="utf-8").splitlines()]
     assert linea in lineas
+
+
+def test_el_solape_de_alertas_debe_cubrir_un_sync_entero() -> None:
+    with pytest.raises(ValidationError, match="ALERTAS_SOLAPE_MINUTOS"):
+        construir(jwt_secret_key=SECRETO_VALIDO, sync_max_minutos=25, alertas_solape_minutos=24)
+
+
+def test_un_solape_igual_o_mayor_que_el_sync_arranca() -> None:
+    assert construir(jwt_secret_key=SECRETO_VALIDO, sync_max_minutos=25, alertas_solape_minutos=25)
+    assert construir(jwt_secret_key=SECRETO_VALIDO, sync_max_minutos=25, alertas_solape_minutos=60)
