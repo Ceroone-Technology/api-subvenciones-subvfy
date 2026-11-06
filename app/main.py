@@ -31,6 +31,7 @@ from app.api.routes import (
     usuarios,
 )
 from app.config import settings
+from app.core.errores import crear_manejador_errores
 from app.core.scheduler import iniciar_scheduler, parar_scheduler
 
 
@@ -69,6 +70,9 @@ app.add_middleware(
     # Sin esto el navegador oculta el nombre de archivo de las descargas (export y documentos).
     expose_headers=["Content-Disposition"],
 )
+
+# Va a `ServerErrorMiddleware`, por fuera del CORS: el manejador añade él mismo las cabeceras.
+app.add_exception_handler(Exception, crear_manejador_errores(settings.cors_origins_list))
 
 app.include_router(auth.router)
 app.include_router(roles.router)
