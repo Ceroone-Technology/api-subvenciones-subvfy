@@ -24,6 +24,7 @@ from app.api.routes import (
     direcciones,
     empresas,
     favoritos,
+    inicio,
     preferencias_aviso,
     radar,
     roles,
@@ -92,6 +93,7 @@ app.include_router(admin_gestion.router)
 app.include_router(convocatorias.router)
 app.include_router(radar.router)
 app.include_router(descartes.router)
+app.include_router(inicio.router)
 app.include_router(catalogos.router)
 
 # Los routers de negocio restantes (análisis IA)

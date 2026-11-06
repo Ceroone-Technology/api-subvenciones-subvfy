@@ -33,6 +33,8 @@ class Usuario(Base, AuditMixin):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     estado: Mapped[str] = mapped_column(String(20), nullable=False, default="activo", server_default="activo")
     ultimo_acceso_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Access before the current session (rolled forward by login, plan N10): "what is new since you were last here".
+    ultimo_acceso_previo_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Opcional (plan N11). El formato lo valida el schema y lo repite el CHECK de la tabla.
     telefono: Mapped[str | None] = mapped_column(String(30))
     # Secret of the personal calendar feed (plan N6). `secrets.token_urlsafe(32)`, created on first use and

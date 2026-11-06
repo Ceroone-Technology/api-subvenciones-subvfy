@@ -43,6 +43,7 @@ CARGO = "Directora de innovación"
 OBJETIVO_FAVORITOS = 8
 OBJETIVO_DESCARTES = 2
 # Days from today at which the seeded favorites should close (varied on purpose: urgent to far).
+DIAS_ACCESO_PREVIO = 3
 DIAS_CIERRE = (2, 5, 9, 13, 20, 30, 50, 90)
 
 PERFIL = {
@@ -329,6 +330,15 @@ async def _preferencias(db: AsyncSession, usuario: Usuario, resumen: Resumen) ->
             .values(usuario_id=usuario.id, tipo=tipo, created_by=usuario.id, updated_by=usuario.id, **valores)
             .on_conflict_do_update(
                 index_elements=[PreferenciaAviso.usuario_id, PreferenciaAviso.tipo], set_={**valores}
+async def _acceso_previo(usuario: Usuario, resumen: Resumen) -> None:
+    """Gives the Inicio counters a "since your last visit" window (only when the user has none)."""
+    if usuario.ultimo_acceso_previo_at is None:
+        usuario.ultimo_acceso_previo_at = datetime.now(UTC) - timedelta(days=DIAS_ACCESO_PREVIO)
+        resumen.anadir(f"Acceso previo: hace {DIAS_ACCESO_PREVIO} días (para las novedades de Inicio).")
+    else:
+        resumen.anadir("Acceso previo: ya tenía uno, no se toca.")
+
+
             )
         )
     resumen.anadir(f"Preferencias de aviso: {len(PREFERENCIAS)} tipos guardados.")
@@ -360,3 +370,4 @@ async def sembrar(db: AsyncSession, email: str, *, hoy: date | None = None) -> R
     await _preferencias(db, usuario, resumen)
     await db.commit()
     return resumen
+    await _acceso_previo(usuario, resumen)

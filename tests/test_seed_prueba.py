@@ -100,6 +100,7 @@ async def test_seeds_the_whole_account(gestor: Sesion, otro_gestor: Sesion, abie
         assert empresa is not None and usuario is not None
         assert (empresa.provincia, empresa.empleados, empresa.facturacion_tramo) == ("Madrid", 35, "2m_10m")
         assert empresa.proyecto_previsto and usuario.telefono == "+34 600 123 456"
+        assert usuario.ultimo_acceso_previo_at is not None
         assert empresa.sitio_web == "https://www.ejemplo-subvfy.es" and usuario.cargo == "Directora de innovación"
         favoritos = (await db.scalars(select(Favorito).where(Favorito.usuario_id == gestor.id))).all()
         alertas = (await db.scalars(select(Alerta).where(Alerta.usuario_id == gestor.id))).all()

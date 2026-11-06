@@ -10,6 +10,7 @@ sobre la estrategia stateless.
 """
 
 import secrets
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import func, select
@@ -40,6 +41,9 @@ from app.schemas.empresa import EmpresaSesion
 from app.schemas.usuario import UsuarioRead
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# A login after this much inactivity starts a new session (see `ultimo_acceso_previo_at`).
+SESION_NUEVA_TRAS = timedelta(minutes=30)
 
 _CREDENCIALES_INVALIDAS = HTTPException(
     status.HTTP_401_UNAUTHORIZED,
@@ -96,6 +100,9 @@ async def login(datos: LoginRequest, db: DbDep) -> SesionResponse:
     if motivo is not None:
         raise CuentaNoOperativa(usuario.estado, estado_empresa)
 
+    # A new session (not a second login minutes later) pushes the last access into "previous access".
+    if usuario.ultimo_acceso_at is not None and datetime.now(UTC) - usuario.ultimo_acceso_at >= SESION_NUEVA_TRAS:
+        usuario.ultimo_acceso_previo_at = usuario.ultimo_acceso_at
     usuario.ultimo_acceso_at = func.now()
     await db.commit()
     await db.refresh(usuario)
