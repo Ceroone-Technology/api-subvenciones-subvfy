@@ -136,8 +136,26 @@ def clasificar_tema(
     return _POR_FINALIDAD.get(_normalizar(finalidad or "").strip(), "otro")
 
 
-def gestiona_por_regla(tema: str) -> bool:
-    return tema in TEMAS_GESTIONADOS
+# A digital or R&D title is not enough: Subvfy manages grants that companies can apply to for a business project.
+_NO_ES_EMPRESA = re.compile(r"no desarrollan actividad economica")
+_FINALIDADES_SOCIALES = frozenset(
+    {"servicios sociales y promocion social", "sanidad", "educacion", "cultura", "defensa"}
+)
+
+
+def gestiona_por_regla(tema: str, *, beneficiarios: Sequence[str] = (), finalidad: str | None = None) -> bool:
+    """Rule for `gestiona_subvfy`: a managed theme, unless beneficiaries are all non-economic or the purpose is social.
+
+    Unknown data never blocks: no beneficiaries listed (a list-only row) or no purpose keeps the theme rule.
+    Example: BDNS 936275 "Programa Aldeas Digitales" (beneficiaries "personas juridicas que no desarrollan actividad
+    economica", purpose "Servicios Sociales y Promocion Social") has theme `dig` but is not managed.
+    """
+    if tema not in TEMAS_GESTIONADOS:
+        return False
+    textos = [_normalizar(b) for b in beneficiarios]
+    if textos and all(_NO_ES_EMPRESA.search(t) for t in textos):
+        return False
+    return _normalizar(finalidad or "").strip() not in _FINALIDADES_SOCIALES
 
 
 def excepcion_de() -> ScalarSelect[bool]:
@@ -178,6 +196,7 @@ async def recalcular(db: AsyncSession, *, prefijo: str = "", lote: int = 1000) -
                 c.finalidad,
                 c.detalle["objetivos"].label("objetivos"),
                 c.sectores,
+                c.beneficiarios,
                 c.tema,
                 c.gestiona_subvfy,
                 excepcion_de().label("excepcion"),
@@ -194,7 +213,8 @@ async def recalcular(db: AsyncSession, *, prefijo: str = "", lote: int = 1000) -
         for f in filas:
             objetivos = [o for o in (f.objetivos or []) if isinstance(o, str)]
             tema = clasificar_tema(titulo=f.titulo, finalidad=f.finalidad, objetivos=objetivos, sectores=f.sectores)
-            gestiona = f.excepcion if f.excepcion is not None else gestiona_por_regla(tema)
+            regla = gestiona_por_regla(tema, beneficiarios=f.beneficiarios, finalidad=f.finalidad)
+            gestiona = f.excepcion if f.excepcion is not None else regla
             resultado.total += 1
             resultado.por_tema[tema] += 1
             resultado.gestionadas += gestiona
@@ -234,9 +254,12 @@ async def fijar_excepcion(
         existente.gestiona, existente.motivo, existente.updated_by = gestiona, motivo, usuario_id
     await db.flush()
     c = Convocatoria
-    efectivo = gestiona if gestiona is not None else gestiona_por_regla(
-        await db.scalar(select(c.tema).where(c.id == convocatoria_id)) or "otro"
-    )
+    efectivo = gestiona
+    if efectivo is None:
+        tema, beneficiarios, finalidad = (
+            await db.execute(select(c.tema, c.beneficiarios, c.finalidad).where(c.id == convocatoria_id))
+        ).one()
+        efectivo = gestiona_por_regla(tema, beneficiarios=beneficiarios, finalidad=finalidad)
     await db.execute(
         update(c)
         .where(c.id == convocatoria_id)

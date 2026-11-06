@@ -130,7 +130,9 @@ def mapear_detalle(
         objetivos=fila["detalle"].get("objetivos", []),
         sectores=fila["sectores"],
     )
-    fila["gestiona_subvfy"] = gestiona_por_regla(fila["tema"])
+    fila["gestiona_subvfy"] = gestiona_por_regla(
+        fila["tema"], beneficiarios=fila["beneficiarios"], finalidad=fila["finalidad"]
+    )
     return fila
 
 

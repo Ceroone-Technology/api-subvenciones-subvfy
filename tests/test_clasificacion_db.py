@@ -247,6 +247,9 @@ async def test_el_sync_clasifica_y_no_pisa_la_excepcion_del_admin(admin: Sesion)
     bdns = FalsaBdns()
     codigo = bdns.nueva()
     bdns.grants[codigo]["descripcion"] = "Ayudas a la digitalización de pymes"
+    # The recorded detail is a social grant for non-economic entities; a business one is what Subvfy manages.
+    bdns.grants[codigo]["tiposBeneficiarios"] = [{"descripcion": "PYME Y PERSONAS FÍSICAS QUE DESARROLLAN ACTIVIDAD ECONÓMICA"}]  # noqa: E501
+    bdns.grants[codigo]["descripcionFinalidad"] = "Comercio, Turismo y Pymes"
     await correr(bdns, admin)
     primera = await fila(codigo)
     assert (primera.tema, primera.gestiona_subvfy) == ("dig", True)
@@ -282,3 +285,17 @@ async def test_la_excepcion_de_una_fila_no_contamina_a_las_demas_del_sync(admin:
     run = await correr(bdns, admin)
     assert run is not None and run.estado == "ok" and run.actualizadas == 3
     assert [(await fila(x)).gestiona_subvfy for x in (a, b, c)] == [True, True, False]
+
+
+async def test_recalcular_no_gestiona_un_titulo_digital_para_entidades_sin_actividad_economica() -> None:
+    m = marca()
+    social = await sembrar(
+        m, "Programa Aldeas Digitales",
+        beneficiarios=["PERSONAS JURÍDICAS QUE NO DESARROLLAN ACTIVIDAD ECONÓMICA"],
+        finalidad="Servicios Sociales y Promoción Social",
+    )  # fmt: skip
+    pyme = ["PYME Y PERSONAS FÍSICAS QUE DESARROLLAN ACTIVIDAD ECONÓMICA"]
+    empresas = await sembrar(m, "Programa Digital", beneficiarios=pyme)
+    await recalcular_de_prueba()
+    assert (await fila(social)).tema == "dig" and (await fila(social)).gestiona_subvfy is False
+    assert (await fila(empresas)).gestiona_subvfy is True

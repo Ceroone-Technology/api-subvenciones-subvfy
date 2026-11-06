@@ -76,3 +76,19 @@ def test_el_catalogo_cubre_todos_los_temas_en_orden() -> None:
     assert tuple(t.codigo for t in CATALOGO_TEMAS) == TEMAS
     assert {t.codigo for t in CATALOGO_TEMAS if t.gestiona_subvfy} == {"dig", "id"}
     assert all(t.nombre for t in CATALOGO_TEMAS)
+
+
+def test_gestiona_exige_beneficiarios_empresa_y_finalidad_no_social() -> None:
+    # BDNS 936275 "Programa Aldeas Digitales": digital title, but non-economic beneficiaries and a social purpose.
+    no_empresa = ["PERSONAS JURÍDICAS QUE NO DESARROLLAN ACTIVIDAD ECONÓMICA"]
+    social = "Servicios Sociales y Promoción Social"
+    assert gestiona_por_regla("dig", beneficiarios=no_empresa, finalidad=social) is False
+    assert gestiona_por_regla("dig", beneficiarios=no_empresa) is False
+    assert gestiona_por_regla("dig", beneficiarios=["PYME Y PERSONAS FÍSICAS QUE DESARROLLAN ACTIVIDAD ECONÓMICA"])
+    # One company-like beneficiary among others is enough; no beneficiaries or purpose never blocks.
+    assert gestiona_por_regla("id", beneficiarios=[*no_empresa, "GRAN EMPRESA"], finalidad="Sanidad") is False
+    assert gestiona_por_regla("id", beneficiarios=[*no_empresa, "GRAN EMPRESA"], finalidad="Comercio, Turismo y Pymes")
+    assert gestiona_por_regla("dig") and gestiona_por_regla("id", finalidad=None)
+    # A social purpose blocks even with company beneficiaries; other themes stay unmanaged whatever the data.
+    assert gestiona_por_regla("dig", beneficiarios=["GRAN EMPRESA"], finalidad="Sanidad") is False
+    assert gestiona_por_regla("ene", beneficiarios=["GRAN EMPRESA"]) is False
