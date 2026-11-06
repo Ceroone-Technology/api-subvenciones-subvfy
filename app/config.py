@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     # entera o nada.
     bdns_dias_primera_ejecucion: int = 7
 
+    # Buscador de direcciones de Mi empresa (CartoCiudad, IGN, sin clave). La API lo consulta por el usuario:
+    # la IP de quien navega no llega al tercero. Salida de red: www.cartociudad.es:443.
+    cartociudad_base_url: str = "https://www.cartociudad.es/geocoder/api/geocoder"
+    cartociudad_timeout_segundos: float = 5.0
+
     # Sincronización local de la BDNS (`bdns-local-sync`). Desactivada por
     # defecto, como el scheduler de alertas; el CLI no depende de este flag.
     sync_habilitado: bool = False

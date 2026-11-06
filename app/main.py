@@ -20,6 +20,7 @@ from app.api.routes import (
     calendario,
     catalogos,
     convocatorias,
+    direcciones,
     empresas,
     favoritos,
     preferencias_aviso,
@@ -75,6 +76,7 @@ app.include_router(favoritos.router)
 app.include_router(seguimiento.router)
 app.include_router(calendario.router)
 app.include_router(preferencias_aviso.router)
+app.include_router(direcciones.router)
 app.include_router(alertas.router)
 app.include_router(admin_sync.router)
 app.include_router(admin_documentos.router)

@@ -367,3 +367,5 @@ Cuatro invariantes que sostienen los tests y conviene no romper:
 **Firma de auditoría**: las filas que escribe el motor llevan `created_by`/`updated_by` del usuario de sistema, vía `app/services/sistema.py`. Es justo para lo que se sembró en `b7f3c21a9d40`. Cualquier proceso automático futuro (sync BDNS, análisis IA en batch) debe usar `id_usuario_sistema()` en vez de inventarse un autor.
 
 **Pendiente de infraestructura, no de código**: verificar el dominio del remitente en SES (SPF/DKIM) y sacar la cuenta del sandbox, donde solo se puede escribir a direcciones verificadas.
+
+**Salida de red a permitir en AWS (Hito 7)**: la API llama a `www.cartociudad.es:443` (HTTPS, buscador `GET /direcciones/buscar`, `CARTOCIUDAD_BASE_URL`) y a `www.infosubvenciones.es:443` (BDNS). Sin esa salida el buscador responde 503 y el front cae a la entrada manual.
