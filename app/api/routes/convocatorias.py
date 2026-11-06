@@ -4,7 +4,7 @@ Todo el router exige un usuario autenticado de cualquier rol (D13): la dependenc
 está a nivel de router para que una ruta nueva no pueda olvidarla. Los datos son
 globales, sin filtro por empresa. Nada de aquí llama a la BDNS.
 
-**Orden de declaración**: `/resumen` va antes de `/{codigo_bdns}`, o la segunda lo capturaría.
+**Orden de declaración**: `/resumen`, `/mapa` y `/export` van antes de `/{codigo_bdns}`, o la segunda lo capturaría.
 """
 
 from datetime import UTC, date, datetime
@@ -27,6 +27,7 @@ from app.schemas.convocatoria import (
     ConvocatoriaDetalle,
     ConvocatoriaResumen,
     DocumentoConvocatoria,
+    MapaConvocatorias,
     NivelAdministracion,
     ResumenConvocatorias,
     TemaConvocatoria,
@@ -35,6 +36,7 @@ from app.schemas.empresa import CodigoActividad
 from app.services import busqueda_convocatorias as busqueda
 from app.services import documentos as servicio_documentos
 from app.services import exportacion_convocatorias as exportacion
+from app.services import mapa_convocatorias as servicio_mapa
 from app.services import radar as servicio_radar
 from app.services.almacen_documentos import AlmacenDocumentos, DocumentoDemasiadoGrande
 from app.services.bdns_sync_cliente import ClienteBdnsSync
@@ -146,6 +148,18 @@ async def listar(
 @router.get("/resumen", response_model=ResumenConvocatorias, summary="Cifras de cabecera del buscador")
 async def resumen(db: DbDep) -> ResumenConvocatorias:
     return ResumenConvocatorias.model_validate(await busqueda.resumen(db))
+
+
+@router.get(
+    "/mapa",
+    response_model=MapaConvocatorias,
+    summary="Totales por comunidad para el mapa",
+    description="Mismos filtros que el listado (`page`, `size` y `orden` no se usan). Una convocatoria en varias "
+    "comunidades cuenta en cada una: la suma de comunidades puede superar `total`. El presupuesto es el total de "
+    "la convocatoria, sin repartir. Caché en memoria de 60 s.",
+)
+async def mapa(db: DbDep, filtros: FiltrosDep) -> MapaConvocatorias:
+    return MapaConvocatorias.model_validate(await servicio_mapa.mapa(db, filtros))
 
 
 @router.get("/export", summary="Exportar el resultado filtrado a CSV o XLSX")

@@ -142,3 +142,32 @@ class ResumenConvocatorias(BaseModel):
     presupuesto_abiertas: float
     total: int
     ultima_sincronizacion: datetime | None
+
+
+class MapaComunidad(BaseModel):
+    region_id: int  # catalogue id of the community: the value the `region` filter takes
+    nombre: str
+    total: int
+    abiertas: int
+    presupuesto: float
+
+
+class MapaZonaEstatal(BaseModel):
+    total: int
+    abiertas: int
+    presupuesto: float
+
+
+class MapaSinZona(BaseModel):
+    total: int
+
+
+class MapaConvocatorias(BaseModel):
+    """`GET /convocatorias/mapa`. A grant in several communities counts in each, so the sum of `por_comunidad`
+    (plus `estatal` and `sin_zona`) can exceed `total`. Budgets are the grant's total, not split."""
+
+    total: int
+    presupuesto_total: float
+    por_comunidad: list[MapaComunidad]
+    estatal: MapaZonaEstatal
+    sin_zona: MapaSinZona
