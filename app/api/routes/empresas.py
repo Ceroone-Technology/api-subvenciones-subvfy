@@ -27,7 +27,10 @@ por usuarios, alertas, análisis IA y por las columnas de auditoría
 FKs o arrastraría datos históricos que el cliente necesita conservar.
 """
 
-from fastapi import APIRouter, HTTPException, Query, status
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import Response
 from sqlalchemy import func, or_, select
 
 from app.api.deps import AdminDep, DbDep, GestorDep, PaginacionDep, UsuarioActualDep
@@ -43,6 +46,8 @@ from app.schemas.empresa import (
     EstadoEmpresa,
 )
 from app.services import empresas as servicio
+from app.services import imagenes_perfil
+from app.services.almacen_documentos import AlmacenDocumentos
 
 router = APIRouter(prefix="/empresas", tags=["empresas"])
 
@@ -162,6 +167,62 @@ async def actualizar_empresa(
     await db.commit()
     await db.refresh(empresa)
     return (await servicio.leer(db, [empresa]))[0]
+
+
+@router.put(
+    "/{empresa_id}/logo",
+    response_model=EmpresaRead,
+    dependencies=[Depends(imagenes_perfil.exigir_tamano_razonable)],
+    summary="Subir o cambiar el logo de la empresa",
+    responses={
+        400: {"description": "Imagen vacía, dañada o con demasiados píxeles."},
+        413: {"description": "Más de 2 MB."},
+        415: {"description": "No es JPEG, PNG ni WebP."},
+    },
+)
+async def subir_logo(
+    empresa_id: int,
+    db: DbDep,
+    actual: GestorDep,
+    destino: Annotated[AlmacenDocumentos, Depends(imagenes_perfil.almacen)],
+    archivo: Annotated[UploadFile, File(description="JPEG, PNG o WebP, máximo 2 MB.")],
+) -> EmpresaRead:
+    actual.exigir_acceso_a_empresa(empresa_id)
+    empresa = await _obtener_o_404(db, empresa_id)
+    empresa.logo_sha256 = await imagenes_perfil.guardar_subida(archivo, destino)
+    empresa.updated_by = actual.id
+    await db.commit()
+    await db.refresh(empresa)
+    return (await servicio.leer(db, [empresa]))[0]
+
+
+@router.delete("/{empresa_id}/logo", status_code=status.HTTP_204_NO_CONTENT, summary="Quitar el logo de la empresa")
+async def quitar_logo(empresa_id: int, db: DbDep, actual: GestorDep) -> None:
+    actual.exigir_acceso_a_empresa(empresa_id)
+    empresa = await _obtener_o_404(db, empresa_id)
+    if empresa.logo_sha256 is not None:
+        empresa.logo_sha256 = None
+        empresa.updated_by = actual.id
+        await db.commit()
+
+
+@router.get(
+    "/{empresa_id}/logo",
+    response_class=Response,
+    summary="Logo de la empresa (autenticado)",
+    responses={200: {"content": {"image/webp": {}}}, 304: {"description": "Sin cambios."}},
+)
+async def obtener_logo(
+    empresa_id: int,
+    request: Request,
+    db: DbDep,
+    actual: UsuarioActualDep,
+    destino: Annotated[AlmacenDocumentos, Depends(imagenes_perfil.almacen)],
+    v: Annotated[str | None, Query(description="Versión (de logo_url); solo afecta a la caché.")] = None,
+) -> Response:
+    actual.exigir_acceso_a_empresa(empresa_id)
+    empresa = await _obtener_o_404(db, empresa_id)
+    return await imagenes_perfil.servir(destino, empresa.logo_sha256, request, v)
 
 
 @router.delete("/{empresa_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Dar de baja una empresa")

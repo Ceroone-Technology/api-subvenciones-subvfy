@@ -52,6 +52,7 @@ async def _foto(sesion: Sesion) -> dict:
             "intereses": await _contar(EmpresaInteres, EmpresaInteres.empresa_id == sesion.empresa_id),
             "perfil": (empresa.provincia, empresa.empleados, empresa.facturacion_tramo, empresa.proyecto_previsto),
             "telefono": usuario.telefono,
+            "cargo": usuario.cargo,
             "actividad": (empresa.actividad_codigo, empresa.actividad_otra),
         }
 
@@ -99,6 +100,7 @@ async def test_seeds_the_whole_account(gestor: Sesion, otro_gestor: Sesion, abie
         assert empresa is not None and usuario is not None
         assert (empresa.provincia, empresa.empleados, empresa.facturacion_tramo) == ("Madrid", 35, "2m_10m")
         assert empresa.proyecto_previsto and usuario.telefono == "+34 600 123 456"
+        assert empresa.sitio_web == "https://www.ejemplo-subvfy.es" and usuario.cargo == "Directora de innovación"
         favoritos = (await db.scalars(select(Favorito).where(Favorito.usuario_id == gestor.id))).all()
         alertas = (await db.scalars(select(Alerta).where(Alerta.usuario_id == gestor.id))).all()
         tarjetas = (await db.scalars(select(Seguimiento).where(Seguimiento.empresa_id == gestor.empresa_id))).all()
@@ -167,7 +169,7 @@ async def test_it_touches_only_that_account(gestor: Sesion, otro_gestor: Sesion,
     despues_colega, despues_ajeno = await _foto(otro_gestor), await _foto(otro)
     # The colleague shares the company, so the company-level seed (profile, interests, board) is visible to him;
     # what is his own stays: favorites, alerts, preferences, phone.
-    for clave in ("favoritos", "descartes", "alertas", "preferencias", "telefono"):
+    for clave in ("favoritos", "descartes", "alertas", "preferencias", "telefono", "cargo"):
         assert despues_colega[clave] == antes_colega[clave], clave
     assert despues_ajeno == antes_ajeno
     assert await _contar(Alerta, Alerta.usuario_id == otro_gestor.id) == 1

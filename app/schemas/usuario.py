@@ -69,6 +69,22 @@ Telefono = Annotated[str | None, BeforeValidator(_normalizar_telefono), AfterVal
 Apellidos = Annotated[str, Field(min_length=1, max_length=150)]
 
 
+def _cargo_o_none(valor: object) -> object:
+    if isinstance(valor, str):
+        return valor.strip() or None
+    return valor
+
+
+def _cargo_cabe(valor: str | None) -> str | None:
+    if valor is not None and len(valor) > 100:
+        raise ValueError("El cargo admite como máximo 100 caracteres.")
+    return valor
+
+
+# No `Field(max_length)` on a `str | None`: pydantic fails when it applies the constraint to None.
+Cargo = Annotated[str | None, BeforeValidator(_cargo_o_none), AfterValidator(_cargo_cabe)]
+
+
 class UsuarioBase(BaseModel):
     empresa_id: int
     rol_id: int
@@ -76,6 +92,7 @@ class UsuarioBase(BaseModel):
     apellidos: Apellidos
     email: EmailStr = Field(max_length=200)
     telefono: Telefono = None
+    cargo: Cargo = None
 
 
 class UsuarioCreate(UsuarioBase):
@@ -92,6 +109,7 @@ class UsuarioUpdate(BaseModel):
     apellidos: Apellidos | None = None
     email: EmailStr | None = Field(default=None, max_length=200)
     telefono: Telefono = None
+    cargo: Cargo = None
     password: Password | None = None
     estado: EstadoUsuario | None = None
 
@@ -102,5 +120,7 @@ class UsuarioRead(UsuarioBase):
     id: int
     estado: EstadoUsuario
     ultimo_acceso_at: datetime | None
+    # Versioned URL of the authenticated GET, or null.
+    avatar_url: str | None = None
     created_at: datetime
     updated_at: datetime

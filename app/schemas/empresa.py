@@ -12,6 +12,7 @@ descarta. La regla vive aquí y en el CHECK de la tabla.
 
 from datetime import datetime
 from typing import Annotated, Literal, Self
+from urllib.parse import urlsplit
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
@@ -54,6 +55,29 @@ def _texto_o_none(valor: str) -> str | None:
 Provincia = Annotated[str, Field(max_length=60), AfterValidator(_texto_o_none)]
 Municipio = Annotated[str, Field(max_length=100), AfterValidator(_texto_o_none)]
 ProyectoPrevisto = Annotated[str, Field(max_length=MAX_PROYECTO_PREVISTO), AfterValidator(_texto_o_none)]
+MAX_SITIO_WEB = 200
+
+
+def _sitio_web_valido(valor: str) -> str | None:
+    """Only absolute http(s) URLs with a host; empty clears it. The table CHECK repeats the rule."""
+    valor = valor.strip()
+    if not valor:
+        return None
+    try:
+        partes = urlsplit(valor)
+        valido = (
+            partes.scheme.lower() in ("http", "https")
+            and bool(partes.hostname)
+            and not any(c.isspace() or ord(c) < 32 for c in valor)
+        )
+    except ValueError:
+        valido = False
+    if not valido:
+        raise ValueError("El sitio web debe ser una dirección http:// o https:// completa.")
+    return valor
+
+
+SitioWeb = Annotated[str, Field(max_length=MAX_SITIO_WEB), AfterValidator(_sitio_web_valido)]
 Empleados = Annotated[int, Field(ge=0, le=MAX_EMPLEADOS)]
 # Each interest at most once; the order is not kept (the catalog order is used on read).
 Intereses = Annotated[list[CodigoInteres], Field(max_length=len(CODIGOS_INTERES))]
@@ -73,6 +97,7 @@ class PerfilAmpliado(BaseModel):
     provincia: Provincia | None = None
     municipio: Municipio | None = None
     proyecto_previsto: ProyectoPrevisto | None = None
+    sitio_web: SitioWeb | None = None
     intereses: Annotated[Intereses, AfterValidator(_sin_repetidos)] | None = None
 
 MENSAJE_OTRA_SIN_TEXTO = "Con la actividad 'OTRA' hay que indicar cuál es."
@@ -149,6 +174,9 @@ class EmpresaRead(EmpresaBase):
     provincia: str | None
     municipio: str | None
     proyecto_previsto: str | None
+    sitio_web: str | None
+    # Versioned URL of the authenticated GET, or null.
+    logo_url: str | None
     # Codes of `GET /catalogos/intereses`, in catalog order.
     intereses: list[str]
     # Derivados del modelo, no almacenados.
@@ -176,6 +204,7 @@ class EmpresaSesion(BaseModel):
     id: int
     actividad_pendiente: bool
     ofrecer_ia: bool
+    logo_url: str | None = None
 
 
 class SectorActividadRead(BaseModel):

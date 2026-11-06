@@ -32,7 +32,10 @@ Dos reglas propias de este recurso:
   borrarlo físicamente rompería la traza de auditoría.
 """
 
-from fastapi import APIRouter, HTTPException, Query, status
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import Response
 from sqlalchemy import func, or_, select
 
 from app.api.deps import DbDep, GestorDep, PaginacionDep, UsuarioActualDep
@@ -41,6 +44,8 @@ from app.core.security import hashear_password
 from app.models import Empresa, Rol, Usuario
 from app.schemas.common import Pagina
 from app.schemas.usuario import EstadoUsuario, UsuarioCreate, UsuarioRead, UsuarioUpdate
+from app.services import imagenes_perfil
+from app.services.almacen_documentos import AlmacenDocumentos
 
 router = APIRouter(prefix="/usuarios", tags=["usuarios"])
 
@@ -166,6 +171,58 @@ async def crear_usuario(datos: UsuarioCreate, db: DbDep, actual: GestorDep) -> U
     await db.commit()
     await db.refresh(usuario)
     return usuario
+
+
+@router.put(
+    "/me/avatar",
+    response_model=UsuarioRead,
+    dependencies=[Depends(imagenes_perfil.exigir_tamano_razonable)],
+    summary="Subir o cambiar mi avatar",
+    responses={
+        400: {"description": "Imagen vacía, dañada o con demasiados píxeles."},
+        413: {"description": "Más de 2 MB."},
+        415: {"description": "No es JPEG, PNG ni WebP."},
+    },
+)
+async def subir_mi_avatar(
+    db: DbDep,
+    actual: UsuarioActualDep,
+    destino: Annotated[AlmacenDocumentos, Depends(imagenes_perfil.almacen)],
+    archivo: Annotated[UploadFile, File(description="JPEG, PNG o WebP, máximo 2 MB.")],
+) -> Usuario:
+    """Cualquier rol, solo el suyo. Se recodifica a WebP de 256 px como máximo, sin metadatos."""
+    sha = await imagenes_perfil.guardar_subida(archivo, destino)
+    actual.usuario.avatar_sha256 = sha
+    actual.usuario.updated_by = actual.id
+    await db.commit()
+    await db.refresh(actual.usuario)
+    return actual.usuario
+
+
+@router.delete("/me/avatar", status_code=status.HTTP_204_NO_CONTENT, summary="Quitar mi avatar")
+async def quitar_mi_avatar(db: DbDep, actual: UsuarioActualDep) -> None:
+    if actual.usuario.avatar_sha256 is not None:
+        actual.usuario.avatar_sha256 = None
+        actual.usuario.updated_by = actual.id
+        await db.commit()
+
+
+@router.get(
+    "/{usuario_id}/avatar",
+    response_class=Response,
+    summary="Avatar de un usuario (autenticado)",
+    responses={200: {"content": {"image/webp": {}}}, 304: {"description": "Sin cambios."}},
+)
+async def obtener_avatar(
+    usuario_id: int,
+    request: Request,
+    db: DbDep,
+    actual: UsuarioActualDep,
+    destino: Annotated[AlmacenDocumentos, Depends(imagenes_perfil.almacen)],
+    v: Annotated[str | None, Query(description="Versión (de avatar_url); solo afecta a la caché.")] = None,
+) -> Response:
+    usuario, _ = await _obtener_visible_o_404(db, usuario_id, actual)
+    return await imagenes_perfil.servir(destino, usuario.avatar_sha256, request, v)
 
 
 @router.get("/{usuario_id}", response_model=UsuarioRead, summary="Obtener un usuario")

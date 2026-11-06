@@ -39,6 +39,7 @@ from app.services.convocatoria_estado import ABIERTA, estado_expr, hoy_madrid
 MARCA = "(dato de prueba)"
 PREFIJO_ALERTA = "Prueba: "
 TELEFONO = "+34 600 123 456"
+CARGO = "Directora de innovación"
 OBJETIVO_FAVORITOS = 8
 OBJETIVO_DESCARTES = 2
 # Days from today at which the seeded favorites should close (varied on purpose: urgent to far).
@@ -50,6 +51,7 @@ PERFIL = {
     "facturacion_tramo": "2m_10m",
     "provincia": "Madrid",
     "municipio": "Madrid",
+    "sitio_web": "https://www.ejemplo-subvfy.es",
     "proyecto_previsto": (
         "Digitalizar la gestión comercial y financiera con un ERP integrado, automatizar la facturación y "
         "reforzar la ciberseguridad de la plataforma de cliente durante los próximos 12 meses."
@@ -170,6 +172,14 @@ async def _telefono(usuario: Usuario, resumen: Resumen) -> None:
         resumen.anadir(f"Teléfono: {TELEFONO} (estaba vacío).")
     else:
         resumen.anadir("Teléfono: ya tenía uno, no se toca.")
+
+
+async def _cargo(usuario: Usuario, resumen: Resumen) -> None:
+    if usuario.cargo is None:
+        usuario.cargo = CARGO
+        resumen.anadir(f"Cargo: {CARGO} (estaba vacío).")
+    else:
+        resumen.anadir("Cargo: ya tenía uno, no se toca.")
 
 
 async def _favoritos(db: AsyncSession, usuario: Usuario, pool: list[Convocatoria], hoy: date, resumen: Resumen) -> None:
@@ -342,6 +352,7 @@ async def sembrar(db: AsyncSession, email: str, *, hoy: date | None = None) -> R
     )
     await _perfil_empresa(db, empresa, usuario.id, resumen)
     await _telefono(usuario, resumen)
+    await _cargo(usuario, resumen)
     await _favoritos(db, usuario, pool, hoy, resumen)
     await _alertas(db, usuario, pool, resumen)
     await _tablero(db, usuario, pool, hoy, resumen)
